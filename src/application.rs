@@ -9,9 +9,10 @@ use thiserror::Error;
 use wasm_bindgen::prelude::*;
 
 use super::{
+    N,
     map,
     render::{RenderState, NewRenderStateError},
-    gpu_map_old::{GPUMap, RenderError},
+    gpu_map::{GPUMap, RenderError},
 };
 
 /// Runs the application
@@ -171,7 +172,7 @@ impl<M: map::Map> State<M> {
         let render_state = RenderState::new(&window).await?;
 
         // Initialize the gpu map
-        let gpu_map = GPUMap::new(&map, &render_state);
+        let gpu_map = GPUMap::new(N, &map, &render_state);
 
         Ok (Self {
             window,

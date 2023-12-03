@@ -480,7 +480,7 @@ impl GPUMap {
         let x = (view_size.get_w() / (SQRT_3 * (N as f64))).ceil() as usize;
         let y = ((view_size.get_h() - (N as f64)) / (3.0 * N as f64)).ceil() as usize;
         
-        // Calculate height and width for the vens and odds
+        // Calculate height and width for the evens and odds
         let w_even = 2 * (x / 2) + 1;
         let w_odd = 2 * ((x + 1) / 2);
         let h_even = 2 * (y / 2) + 1;
