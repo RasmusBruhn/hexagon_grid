@@ -8,6 +8,8 @@ use thiserror::Error;
 #[cfg(target_arch="wasm32")]
 use wasm_bindgen::prelude::*;
 
+use crate::types::{Point, Transform2D};
+
 use super::{
     N,
     map,
@@ -172,7 +174,7 @@ impl<M: map::Map> State<M> {
         let render_state = RenderState::new(&window).await?;
 
         // Initialize the gpu map
-        let gpu_map = GPUMap::new(N, &map, &render_state);
+        let gpu_map = GPUMap::new(N, 2.0, &Transform2D::scale(&Point::new(0.1, 0.1)), &map, &render_state);
 
         Ok (Self {
             window,

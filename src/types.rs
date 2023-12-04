@@ -38,6 +38,13 @@ impl Point {
     pub fn get_data(&self) -> [f32; 2] {
         [self.x as f32, self.y as f32]
     }
+
+    pub fn to_size(&self) -> Size {
+        if cfg!(debug_assertions) && (self.x < 0.0 || self.y < 0.0) {
+            panic!("The coordinates must not be negative when converting to a size but received: {:?}", *self);
+        }
+        Size::new(self.x, self.y)
+    }
 }
 
 impl Neg for Point {
@@ -45,6 +52,14 @@ impl Neg for Point {
 
     fn neg(self) -> Self::Output {
         Self::new(-self.x, -self.y)
+    }
+}
+
+impl Neg for &Point {
+    type Output = Point;
+
+    fn neg(self) -> Self::Output {
+        Point::new(-self.x, -self.y)
     }
 }
 
@@ -56,6 +71,48 @@ impl Add<Point> for Point {
         let y = self.y + rhs.y;
 
         Self {
+            x,
+            y,
+        }
+    }
+}
+
+impl Add<&Point> for Point {
+    type Output = Point;
+
+    fn add(self, rhs: &Point) -> Self::Output {
+        let x = self.x + rhs.x;
+        let y = self.y + rhs.y;
+
+        Self {
+            x,
+            y,
+        }
+    }
+}
+
+impl Add<Point> for &Point {
+    type Output = Point;
+
+    fn add(self, rhs: Point) -> Self::Output {
+        let x = self.x + rhs.x;
+        let y = self.y + rhs.y;
+
+        Point {
+            x,
+            y,
+        }
+    }
+}
+
+impl Add<&Point> for &Point {
+    type Output = Point;
+
+    fn add(self, rhs: &Point) -> Self::Output {
+        let x = self.x + rhs.x;
+        let y = self.y + rhs.y;
+
+        Point {
             x,
             y,
         }
@@ -76,6 +133,48 @@ impl Sub<Point> for Point {
     }
 }
 
+impl Sub<&Point> for Point {
+    type Output = Point;
+
+    fn sub(self, rhs: &Point) -> Self::Output {
+        let x = self.x - rhs.x;
+        let y = self.y - rhs.y;
+
+        Self {
+            x,
+            y,
+        }
+    }
+}
+
+impl Sub<Point> for &Point {
+    type Output = Point;
+
+    fn sub(self, rhs: Point) -> Self::Output {
+        let x = self.x - rhs.x;
+        let y = self.y - rhs.y;
+
+        Point {
+            x,
+            y,
+        }
+    }
+}
+
+impl Sub<&Point> for &Point {
+    type Output = Point;
+
+    fn sub(self, rhs: &Point) -> Self::Output {
+        let x = self.x - rhs.x;
+        let y = self.y - rhs.y;
+
+        Point {
+            x,
+            y,
+        }
+    }
+}
+
 impl Mul<f64> for Point {
     type Output = Point;
 
@@ -84,6 +183,48 @@ impl Mul<f64> for Point {
         let y = self.y * rhs;
 
         Self {
+            x,
+            y,
+        }
+    }
+}
+
+impl Mul<&f64> for Point {
+    type Output = Point;
+
+    fn mul(self, rhs: &f64) -> Self::Output {
+        let x = self.x * rhs;
+        let y = self.y * rhs;
+
+        Self {
+            x,
+            y,
+        }
+    }
+}
+
+impl Mul<f64> for &Point {
+    type Output = Point;
+
+    fn mul(self, rhs: f64) -> Self::Output {
+        let x = self.x * rhs;
+        let y = self.y * rhs;
+
+        Point {
+            x,
+            y,
+        }
+    }
+}
+
+impl Mul<&f64> for &Point {
+    type Output = Point;
+
+    fn mul(self, rhs: &f64) -> Self::Output {
+        let x = self.x * rhs;
+        let y = self.y * rhs;
+
+        Point {
             x,
             y,
         }
@@ -269,12 +410,12 @@ impl Matrix {
         }
 
         // Calculate inverse
-        Self::new(&[[self.values[1][1], -self.values[0][1]], [-self.values[1][0], self.values[0][0]]])
+        Self::new(&[[self.values[1][1] / d, -self.values[0][1] / d], [-self.values[1][0] / d, self.values[0][0] / d]])
     }
 
     /// Retrieves the data for the gpu
     pub fn get_data(&self) -> [f32; 4] {
-        [self.values[0][0] as f32, self.values[0][1] as f32, self.values[1][0] as f32, self.values[1][1] as f32]
+        [self.values[0][0] as f32, self.values[1][0] as f32, self.values[0][1] as f32, self.values[1][1] as f32]
     }
 }
 
@@ -460,10 +601,70 @@ impl Mul<Transform2D> for Transform2D {
     }
 }
 
+impl Mul<&Transform2D> for Transform2D {
+    type Output = Transform2D;
+
+    /// t2 * t1 * x = r2 * (r1 * (x - c1) - c2) = r2 * r1 * (x - c1 - r1^-1 * c2)
+    fn mul(self, rhs: &Transform2D) -> Self::Output {
+        let center_transform = self.center_transform * rhs.center_transform;
+        let center = rhs.center + rhs.center_transform.inv() * self.center;
+
+        Self { center_transform, center }
+    }
+}
+
+impl Mul<Transform2D> for &Transform2D {
+    type Output = Transform2D;
+
+    /// t2 * t1 * x = r2 * (r1 * (x - c1) - c2) = r2 * r1 * (x - c1 - r1^-1 * c2)
+    fn mul(self, rhs: Transform2D) -> Self::Output {
+        let center_transform = self.center_transform * rhs.center_transform;
+        let center = rhs.center + rhs.center_transform.inv() * self.center;
+
+        Transform2D { center_transform, center }
+    }
+}
+
+impl Mul<&Transform2D> for &Transform2D {
+    type Output = Transform2D;
+
+    /// t2 * t1 * x = r2 * (r1 * (x - c1) - c2) = r2 * r1 * (x - c1 - r1^-1 * c2)
+    fn mul(self, rhs: &Transform2D) -> Self::Output {
+        let center_transform = self.center_transform * rhs.center_transform;
+        let center = rhs.center + rhs.center_transform.inv() * self.center;
+
+        Transform2D { center_transform, center }
+    }
+}
+
 impl Mul<Point> for Transform2D {
     type Output = Point;
 
     fn mul(self, rhs: Point) -> Self::Output {
+        self.center_transform * (rhs - self.center)
+    }
+}
+
+impl Mul<&Point> for Transform2D {
+    type Output = Point;
+
+    fn mul(self, rhs: &Point) -> Self::Output {
+        self.center_transform * (rhs - self.center)
+    }
+}
+
+impl Mul<Point> for &Transform2D {
+    type Output = Point;
+
+    fn mul(self, rhs: Point) -> Self::Output {
+        self.center_transform * (rhs - self.center)
+    }
+}
+
+impl Mul<&Point> for &Transform2D {
+    type Output = Point;
+
+    fn mul(self, rhs: &Point) -> Self::Output {
         self.center_transform * (rhs - self.center)
     }
 }

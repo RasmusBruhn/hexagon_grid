@@ -1,20 +1,19 @@
 use super::{
     INV_SQRT_3, SQRT_3, START_COLOR, END_COLOR,
-    types::{Point, Index, Transform2D},
+    types::{Point, Size, Index, View, Transform2D},
     render::RenderState,
     map,
 };
-use std::mem;
+use std::{mem, f64};
 use wgpu::util::DeviceExt;
 use thiserror::Error;
 
 /// The representation of a map in the gpu allowing for rendering
 pub struct GPUMap {
-    /// The currently loaded view, reload some chunks when the screen view goes outside of this
-    //view: View,
-    /// The size of the buffer of the view
-    //view_buffer_size: f64,
-
+    /// The currently loaded view, when the visible region goes outside of this then a reload is needed
+    view: View,
+    /// The amount of the map to load relative to the shown area, must be at least 1
+    map_buffer_size: f64,
     /// The transform of the screen
     transform: Transform2D,
     /// The buffer for all the loaded chunks
@@ -39,10 +38,51 @@ pub struct GPUMap {
 
 
 impl GPUMap {
-    pub fn new<M: map::Map>(size: usize, map: &M, render_state: &RenderState) -> Self {
+    pub fn new<M: map::Map>(size: usize, map_buffer_size: f64, transform: &Transform2D, map: &M, render_state: &RenderState) -> Self {
         if cfg!(debug_assertions) && size < 1 {
             panic!("size must be at least 1");
         }
+
+        // Calculate the rendered view
+        let render_view = Self::transform_to_view(transform);
+        let render_view = View::new(*render_view.get_center(), *render_view.get_size() * map_buffer_size);
+
+        // Get the center index and index size
+        let index_center = Self::get_center_index(size, render_view.get_center());
+        let index_size = Self::get_size_index(size, render_view.get_size());
+
+        // Get the full view
+        let load_center = Self::chunk_index_to_pos(size, &index_center);
+        let load_size = Self::size_index_to_size(size, &index_size);
+        let view = View::new(load_center, load_size);
+
+        // Get the chunks to load
+        let origins_chunk = (-index_size.get_y()..(index_size.get_y() + 1)).map(|index_y| {
+            ((-(index_size.get_x() + index_y) / 2)..((index_size.get_x() - index_y) / 2 + 1)).map(|index_x| {
+                Index::new(index_x, index_y)
+            }).collect::<Vec<Index>>().into_iter()
+        }).flatten();
+
+        // Get the edges to load
+        let origins_edge_0 = (-index_size.get_y()..(index_size.get_y() + 1)).map(|index_y| {
+            ((-(index_size.get_x() - 1 + index_y) / 2)..((index_size.get_x() + 1 - index_y) / 2 + 1)).map(|index_x| {
+                Index::new(index_x, index_y)
+            }).collect::<Vec<Index>>().into_iter()
+        }).flatten();
+        let origins_edge_1 = (-index_size.get_y()..index_size.get_y()).map(|index_y| {
+            ((-(index_size.get_x() - 1 + index_y) / 2)..((index_size.get_x() - index_y) / 2 + 1)).map(|index_x| {
+                Index::new(index_x, index_y)
+            }).collect::<Vec<Index>>().into_iter()
+        }).flatten();
+        let origins_edge_2 = (-index_size.get_y()..index_size.get_y()).map(|index_y| {
+            ((-(index_size.get_x() + index_y) / 2)..((index_size.get_x() + 1 - index_y) / 2)).map(|index_x| {
+                Index::new(index_x, index_y)
+            }).collect::<Vec<Index>>().into_iter()
+        }).flatten();
+
+        // Get the vertices to load
+        let origins_vertex_0 = origins_edge_0.clone();
+        let origins_vertex_1 = origins_edge_0.clone();
 
         // Get locations for the chunk
         let locations_chunk: Vec<Point> = [Point::new(0.0, 0.0)].into_iter().chain((1..size).map(|layer| {
@@ -61,11 +101,6 @@ impl GPUMap {
             }).flatten().collect::<Vec<Point>>()
         }).flatten()).collect();
 
-        // Setup the chunk buffer
-        let buffer_chunk = vec![
-            Buffer::new(&locations_chunk, &map.get_chunk(Index::new(0, 0)).get_id(), &chunk_index_to_pos(size, &Index::new(0, 0)), render_state)
-        ];
-
         // Get locations for the edges
         let locations_edge_0: Vec<Point> = (1..size).map(|pos| {
             let start_pos = Point::new(-0.5 * SQRT_3 * (size as f64), -0.5 * (size as f64));
@@ -82,41 +117,39 @@ impl GPUMap {
             let dir = Point::new(0.5 * SQRT_3, -0.5);
             start_pos + dir * (pos as f64)
         }).collect();
-
-        // Setup the edge buffers
-        let buffer_edge_0 = vec![
-            Buffer::new(&locations_edge_0, &map.get_edge_vertical(Index::new(0, 0)).get_id(), &chunk_index_to_pos(size, &Index::new(0, 0)), render_state),
-            Buffer::new(&locations_edge_0, &map.get_edge_vertical(Index::new(1, 0)).get_id(), &chunk_index_to_pos(size, &Index::new(1, 0)), render_state)
-        ];
-        let buffer_edge_1 = vec![
-            Buffer::new(&locations_edge_1, &map.get_edge_left(Index::new(0, 0)).get_id(), &chunk_index_to_pos(size, &Index::new(0, 0)), render_state),
-            Buffer::new(&locations_edge_1, &map.get_edge_left(Index::new(1, -1)).get_id(), &chunk_index_to_pos(size, &Index::new(1, -1)), render_state)
-        ];
-        let buffer_edge_2 = vec![
-            Buffer::new(&locations_edge_2, &map.get_edge_right(Index::new(0, 0)).get_id(), &chunk_index_to_pos(size, &Index::new(0, 0)), render_state),
-            Buffer::new(&locations_edge_2, &map.get_edge_right(Index::new(0, -1)).get_id(), &chunk_index_to_pos(size, &Index::new(0, -1)), render_state)
-        ];
-        let buffer_edge = [buffer_edge_0, buffer_edge_1, buffer_edge_2];
-
+        
         // Get locations for the vertices
         let locations_vertex_0 = vec![Point::new(-0.5 * SQRT_3 * (size as f64), -0.5 * (size as f64))];
         let locations_vertex_1 = vec![Point::new(-0.5 * SQRT_3 * (size as f64), 0.5 * (size as f64))];
 
+        // Setup the chunk buffer
+        let buffer_chunk = origins_chunk.map(|origin_index| {
+            Buffer::new(&locations_chunk, &map.get_chunk(origin_index).get_id(), &Self::chunk_index_to_pos(size, &origin_index), render_state)
+        }).collect();
+        
+        // Setup the edge buffers
+        let buffer_edge_0 = origins_edge_0.map(|origin_index| {
+            Buffer::new(&locations_edge_0, &map.get_edge_vertical(origin_index).get_id(), &Self::chunk_index_to_pos(size, &origin_index), render_state)
+        }).collect();
+        let buffer_edge_1 = origins_edge_1.map(|origin_index| {
+            Buffer::new(&locations_edge_1, &map.get_edge_left(origin_index).get_id(), &Self::chunk_index_to_pos(size, &origin_index), render_state)
+        }).collect();
+        let buffer_edge_2 = origins_edge_2.map(|origin_index| {
+            Buffer::new(&locations_edge_2, &map.get_edge_right(origin_index).get_id(), &Self::chunk_index_to_pos(size, &origin_index), render_state)
+        }).collect();
+        let buffer_edge = [buffer_edge_0, buffer_edge_1, buffer_edge_2];
+
         // Setup the vertex buffers
-        let buffer_vertex_0 = vec![
-            Buffer::new(&locations_vertex_0, &map.get_vertex_bottom(Index::new(0, 0)).get_id(), &chunk_index_to_pos(size, &Index::new(0, 0)), render_state),
-            Buffer::new(&locations_vertex_0, &map.get_vertex_bottom(Index::new(1, 0)).get_id(), &chunk_index_to_pos(size, &Index::new(1, 0)), render_state),
-            Buffer::new(&locations_vertex_0, &map.get_vertex_bottom(Index::new(0, 1)).get_id(), &chunk_index_to_pos(size, &Index::new(0, 1)), render_state),
-        ];
-        let buffer_vertex_1 = vec![
-            Buffer::new(&locations_vertex_1, &map.get_vertex_bottom(Index::new(0, 0)).get_id(), &chunk_index_to_pos(size, &Index::new(0, 0)), render_state),
-            Buffer::new(&locations_vertex_1, &map.get_vertex_bottom(Index::new(1, -1)).get_id(), &chunk_index_to_pos(size, &Index::new(1, -1)), render_state),
-            Buffer::new(&locations_vertex_1, &map.get_vertex_bottom(Index::new(1, 0)).get_id(), &chunk_index_to_pos(size, &Index::new(1, 0)), render_state),
-        ];
+        let buffer_vertex_0 = origins_vertex_0.map(|origin_index| {
+            Buffer::new(&locations_vertex_0, &map.get_vertex_bottom(origin_index).get_id(), &Self::chunk_index_to_pos(size, &origin_index), render_state)
+        }).collect();
+        let buffer_vertex_1 = origins_vertex_1.map(|origin_index| {
+            Buffer::new(&locations_vertex_1, &map.get_vertex_top(origin_index).get_id(), &Self::chunk_index_to_pos(size, &origin_index), render_state)
+        }).collect();
         let buffer_vertex = [buffer_vertex_0, buffer_vertex_1];
 
         // Create transform
-        let transform = Transform2D::scale(&Point::new(0.2, 0.2));
+        let transform = Transform2D::scale(&Point::new(0.25, 0.25)) * transform;
         
         // Create transform buffer
         let buffer_center_transform = render_state.get_device().create_buffer(&wgpu::BufferDescriptor {
@@ -309,6 +342,8 @@ impl GPUMap {
         });
 
         Self {
+            view,
+            map_buffer_size,
             transform,
             buffer_chunk,
             buffer_edge,
@@ -407,13 +442,57 @@ impl GPUMap {
         // Submit
         render_state.get_queue().submit(std::iter::once(encoder.finish()));
     }
-}
 
-fn chunk_index_to_pos(size: usize, coord: &Index) -> Point {
-    let x = SQRT_3 * ((coord.get_x() as f64) + (coord.get_y() as f64) / 2.0) * (size as f64);
-    let y = (coord.get_y() as f64) * (size as f64) * 1.5;
-    Point::new(x, y)
-}    
+    fn chunk_index_to_pos(size: usize, coord: &Index) -> Point {
+        let x = SQRT_3 * ((coord.get_x() as f64) + (coord.get_y() as f64) / 2.0) * (size as f64);
+        let y = (coord.get_y() as f64) * (size as f64) * 1.5;
+        Point::new(x, y)
+    }
+
+    fn transform_to_view(transform: &Transform2D) -> View {
+        let transform_inverse = transform.inv();
+        let points: (Point, Point) = [Point::new(-1.0, -1.0), Point::new(1.0, -1.0), Point::new(1.0, 1.0), Point::new(-1.0, 1.0)].iter().map(|point| {
+            transform_inverse * point
+        }).fold((Point::new(f64::INFINITY, f64::INFINITY), Point::new(-f64::INFINITY, -f64::INFINITY)), |prev, next| {
+            (Point::new(f64::min(prev.0.get_x(), next.get_x()), f64::min(prev.0.get_y(), next.get_y())), Point::new(f64::max(prev.1.get_x(), next.get_x()), f64::max(prev.1.get_y(), next.get_y())))
+        });
+        View::new((points.0 + points.1) * 0.5, (points.1 - points.0).to_size())
+    }
+
+    fn get_center_index(size: usize, center: &Point) -> Index {
+        // Calculate some base values
+        let scaled_x = center.get_x() / (SQRT_3 * (size as f64));
+        let scaled_y = center.get_y() / (3.0 * (size as f64));
+        let remain_x = scaled_x - scaled_x.floor();
+        let remain_y = scaled_y - scaled_y.floor();
+        
+        // Find the indices
+        let cutoff = (size as f64) / 6.0 * (2.0 * (remain_x - 0.5).abs() + 1.0);
+        let index_y = if remain_y < cutoff || cutoff <= remain_y { // An even row
+            ((scaled_y + 0.5).floor() as i64) * 2
+        } else { // an odd row
+            (scaled_y.floor() as i64) * 2 + 1
+        };
+        let index_x = (scaled_x - 0.5 * (index_y as f64) + 0.5).floor() as i64;
+        Index::new(index_x, index_y)
+    }
+
+    fn get_size_index(size: usize, view_size: &Size) -> Index {
+        // Find the x size
+        let size_x = (view_size.get_w() / (SQRT_3 * (size as f64)) + 1.0).ceil() as i64;
+
+        // Find the y size
+        let size_y = (view_size.get_h() / (3.0 * (size as f64)) + 1.0 / 3.0).ceil() as i64;
+
+        Index::new(size_x, size_y)
+    }
+
+    fn size_index_to_size(size: usize, size_index: &Index) -> Size {
+        let w = (size_index.get_x() as f64) * SQRT_3 * (size as f64);
+        let h = ((size_index.get_y() as f64) * 3.0 + 1.0) * (size as f64);
+        Size::new(w, h)
+    }
+}
 
 /// A buffer which can draw a group of hexagons like a chunk or edge
 /// 
