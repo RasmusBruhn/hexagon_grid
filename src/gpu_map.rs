@@ -1,6 +1,7 @@
 use super::{
-    INV_SQRT_3, SQRT_3, START_COLOR, END_COLOR,
+    INV_SQRT_3, SQRT_3,
     types::{Point, Size, Index, View, Transform2D},
+    color::ColorMap,
     render::RenderState,
     map,
 };
@@ -8,37 +9,97 @@ use std::{mem, f64};
 use wgpu::util::DeviceExt;
 use thiserror::Error;
 
-/// The representation of a map in the gpu allowing for rendering
-pub struct GPUMap {
+struct GPUMapView {
+    /// The size of a chunk (radius)
+    size: usize,
     /// The currently loaded view, when the visible region goes outside of this then a reload is needed
     view: View,
     /// The amount of the map to load relative to the shown area, must be at least 1
     map_buffer_size: f64,
-    /// The transform of the screen
+    /// The transform from world coordinates to the screen
     transform: Transform2D,
-    /// The buffer for all the loaded chunks
-    buffer_chunk: Vec<Buffer>,
-    /// The buffer for all the loaded edges
-    buffer_edge: [Vec<Buffer>; 3],
-    /// The buffer for all the loaded vetices
-    buffer_vertex: [Vec<Buffer>; 2],
-    /// The transformation matrix
-    buffer_center_transform: wgpu::Buffer,
-    /// The draw mode buffer
-    buffer_draw_mode: wgpu::Buffer,
-    /// The color map buffer
-    _buffer_color_map: wgpu::Buffer,
-    /// The bind group for the center transform and the draw mode
-    bind_group: wgpu::BindGroup,
-    /// The render pipeline for filling
-    pipeline_fill: wgpu::RenderPipeline,
-    /// The render pipeline for the outline
-    pipeline_outline: wgpu::RenderPipeline,
+    /// The index of the center chunk
+    index_center: Index,
+    /// Values related to the number of chunks loaded in the x and y direction
+    index_size: Index,
 }
 
+struct GPUMapHexBuffers {
+    /// The hex vertex buffer
+    vertices: wgpu::Buffer,
+    /// The buffer holding all of the bulk index data for a hexagon
+    indices_bulk: wgpu::Buffer,
+    /// The buffer holding all of the edge index data for a hexagon
+    indices_edge: wgpu::Buffer,
+}
 
-impl GPUMap {
-    pub fn new<M: map::Map>(size: usize, map_buffer_size: f64, transform: &Transform2D, map: &M, render_state: &RenderState) -> Self {
+/// A buffer which can draw a group of hexagons like a chunk or edge
+/// 
+/// S: The number of hexagons in one element
+struct GPUMapDataBuffer {
+    /// The number of hexagons
+    size: usize,
+    /// The origin of the hexagons (center coordinate is: location + origin)
+    origin_data: Point,
+    /// The id of each of the hexagons
+    ids: wgpu::Buffer,
+    /// The buffer to write origin to the gpu
+    origin: wgpu::Buffer,
+    /// The bind group for the origin
+    bind_group_origin: wgpu::BindGroup,
+}
+
+struct GPUMapDataBufferList {
+    /// The locations buffer
+    locations: wgpu::Buffer,
+    /// The buffers for id and origin
+    buffers: Vec<GPUMapDataBuffer>,
+}
+
+struct GPUMapDataBuffers {
+    /// All the chunk data
+    chunk: GPUMapDataBufferList,
+    /// All the edge data
+    edges: [GPUMapDataBufferList; 3],
+    /// All the vertex data
+    vertices: [GPUMapDataBufferList; 2],
+}
+
+struct GPUMapUniforms {
+    /// The transformation matrix
+    center_transform: wgpu::Buffer,
+    /// The draw mode buffer
+    draw_mode: wgpu::Buffer,
+    /// The color map buffer
+    _color_map: wgpu::Buffer,
+    /// The bind group for the center transform and the draw mode
+    bind_group: wgpu::BindGroup,
+}
+
+struct GPUMapPipelines {
+    /// The render pipeline for filling
+    fill: wgpu::RenderPipeline,
+    /// The render pipeline for the outline
+    outline: wgpu::RenderPipeline,
+}
+
+/// The representation of a map in the gpu allowing for rendering
+pub struct GPUMap {
+    /// All data related to the view and screen transform
+    view: GPUMapView,
+    /// All the buffers for producing hexagons
+    hex_buffers: GPUMapHexBuffers,
+    /// All of the location and id buffers for the map
+    data_buffers: GPUMapDataBuffers,
+    /// All of the uniforms
+    uniforms: GPUMapUniforms,
+    /// All of the pipelines
+    pipelines: GPUMapPipelines,
+}
+
+impl GPUMapView {
+    fn new(size: usize, map_buffer_size: f64, transform: &Transform2D) -> Self {
+        // Make sure size is large enough
         if cfg!(debug_assertions) && size < 1 {
             panic!("size must be at least 1");
         }
@@ -52,398 +113,24 @@ impl GPUMap {
         let index_size = Self::get_size_index(size, render_view.get_size());
 
         // Get the full view
-        let load_center = Self::chunk_index_to_pos(size, &index_center);
+        let load_center = Self::index_to_origin(size, &index_center);
         let load_size = Self::size_index_to_size(size, &index_size);
         let view = View::new(load_center, load_size);
-
-        // Get the chunks to load
-        let origins_chunk = (-index_size.get_y()..(index_size.get_y() + 1)).map(|index_y| {
-            ((-(index_size.get_x() + index_y) / 2)..((index_size.get_x() - index_y) / 2 + 1)).map(|index_x| {
-                Index::new(index_x, index_y)
-            }).collect::<Vec<Index>>().into_iter()
-        }).flatten();
-
-        // Get the edges to load
-        let origins_edge_0 = (-index_size.get_y()..(index_size.get_y() + 1)).map(|index_y| {
-            ((-(index_size.get_x() - 1 + index_y) / 2)..((index_size.get_x() + 1 - index_y) / 2 + 1)).map(|index_x| {
-                Index::new(index_x, index_y)
-            }).collect::<Vec<Index>>().into_iter()
-        }).flatten();
-        let origins_edge_1 = (-index_size.get_y()..index_size.get_y()).map(|index_y| {
-            ((-(index_size.get_x() - 1 + index_y) / 2)..((index_size.get_x() - index_y) / 2 + 1)).map(|index_x| {
-                Index::new(index_x, index_y)
-            }).collect::<Vec<Index>>().into_iter()
-        }).flatten();
-        let origins_edge_2 = (-index_size.get_y()..index_size.get_y()).map(|index_y| {
-            ((-(index_size.get_x() + index_y) / 2)..((index_size.get_x() + 1 - index_y) / 2)).map(|index_x| {
-                Index::new(index_x, index_y)
-            }).collect::<Vec<Index>>().into_iter()
-        }).flatten();
-
-        // Get the vertices to load
-        let origins_vertex_0 = origins_edge_0.clone();
-        let origins_vertex_1 = origins_edge_0.clone();
-
-        // Get locations for the chunk
-        let locations_chunk: Vec<Point> = [Point::new(0.0, 0.0)].into_iter().chain((1..size).map(|layer| {
-            (0..6).map(|slice| {
-                let (layer_dir, pos_dir) = match slice {
-                    0 => (Point::new(0.5 * SQRT_3, 0.5), Point::new(-0.5 * SQRT_3, 0.5)),
-                    1 => (Point::new(0.0, 1.0), Point::new(-0.5 * SQRT_3, -0.5)),
-                    2 => (Point::new(-0.5 * SQRT_3, 0.5), Point::new(0.0, -1.0)),
-                    3 => (Point::new(-0.5 * SQRT_3, -0.5), Point::new(0.5 * SQRT_3, -0.5)),
-                    4 => (Point::new(0.0, -1.0), Point::new(0.5 * SQRT_3, 0.5)),
-                    _ => (Point::new(0.5 * SQRT_3, -0.5), Point::new(0.0, 1.0)),
-                };
-                (0..layer).map(|pos| {
-                    layer_dir * (layer as f64) + pos_dir * (pos as f64)
-                }).collect::<Vec<Point>>().into_iter()
-            }).flatten().collect::<Vec<Point>>()
-        }).flatten()).collect();
-
-        // Get locations for the edges
-        let locations_edge_0: Vec<Point> = (1..size).map(|pos| {
-            let start_pos = Point::new(-0.5 * SQRT_3 * (size as f64), -0.5 * (size as f64));
-            let dir = Point::new(0.0, 1.0);
-            start_pos + dir * (pos as f64)
-        }).collect();
-        let locations_edge_1: Vec<Point> = (1..size).map(|pos| {
-            let start_pos = Point::new(-0.5 * SQRT_3 * (size as f64), 0.5 * (size as f64));
-            let dir = Point::new(0.5 * SQRT_3, 0.5);
-            start_pos + dir * (pos as f64)
-        }).collect();
-        let locations_edge_2: Vec<Point> = (1..size).map(|pos| {
-            let start_pos = Point::new(0.0, size as f64);
-            let dir = Point::new(0.5 * SQRT_3, -0.5);
-            start_pos + dir * (pos as f64)
-        }).collect();
-        
-        // Get locations for the vertices
-        let locations_vertex_0 = vec![Point::new(-0.5 * SQRT_3 * (size as f64), -0.5 * (size as f64))];
-        let locations_vertex_1 = vec![Point::new(-0.5 * SQRT_3 * (size as f64), 0.5 * (size as f64))];
-
-        // Setup the chunk buffer
-        let buffer_chunk = origins_chunk.map(|origin_index| {
-            Buffer::new(&locations_chunk, &map.get_chunk(origin_index).get_id(), &Self::chunk_index_to_pos(size, &origin_index), render_state)
-        }).collect();
-        
-        // Setup the edge buffers
-        let buffer_edge_0 = origins_edge_0.map(|origin_index| {
-            Buffer::new(&locations_edge_0, &map.get_edge_vertical(origin_index).get_id(), &Self::chunk_index_to_pos(size, &origin_index), render_state)
-        }).collect();
-        let buffer_edge_1 = origins_edge_1.map(|origin_index| {
-            Buffer::new(&locations_edge_1, &map.get_edge_left(origin_index).get_id(), &Self::chunk_index_to_pos(size, &origin_index), render_state)
-        }).collect();
-        let buffer_edge_2 = origins_edge_2.map(|origin_index| {
-            Buffer::new(&locations_edge_2, &map.get_edge_right(origin_index).get_id(), &Self::chunk_index_to_pos(size, &origin_index), render_state)
-        }).collect();
-        let buffer_edge = [buffer_edge_0, buffer_edge_1, buffer_edge_2];
-
-        // Setup the vertex buffers
-        let buffer_vertex_0 = origins_vertex_0.map(|origin_index| {
-            Buffer::new(&locations_vertex_0, &map.get_vertex_bottom(origin_index).get_id(), &Self::chunk_index_to_pos(size, &origin_index), render_state)
-        }).collect();
-        let buffer_vertex_1 = origins_vertex_1.map(|origin_index| {
-            Buffer::new(&locations_vertex_1, &map.get_vertex_top(origin_index).get_id(), &Self::chunk_index_to_pos(size, &origin_index), render_state)
-        }).collect();
-        let buffer_vertex = [buffer_vertex_0, buffer_vertex_1];
 
         // Create transform
         let transform = Transform2D::scale(&Point::new(0.25, 0.25)) * transform;
         
-        // Create transform buffer
-        let buffer_center_transform = render_state.get_device().create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Transform Buffer"),
-            size: (mem::size_of::<f32>() * 4) as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        // Create draw mode buffer
-        let buffer_draw_mode = render_state.get_device().create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Draw Mode Buffer"),
-            size: std::mem::size_of::<u32>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        // Create the color map
-        let color_map: Vec<[f32; 4]> = (0..size + 1).map(|id| {
-            let fraction = (id as f32) / (size as f32);
-            [
-                fraction * (END_COLOR[0] - START_COLOR[0]) + START_COLOR[0],
-                fraction * (END_COLOR[1] - START_COLOR[1]) + START_COLOR[1],
-                fraction * (END_COLOR[2] - START_COLOR[2]) + START_COLOR[2],
-                fraction * (END_COLOR[3] - START_COLOR[3]) + START_COLOR[3],
-            ]
-        }).collect();
-        let buffer_color_map = render_state.get_device().create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Color Map Buffer"),
-            contents: bytemuck::cast_slice(&color_map),
-            usage: wgpu::BufferUsages::STORAGE,
-        });
-
-        // Create bind group for transform and mode
-        let bind_group_layout = render_state.get_device().create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Bind Group Main Layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-        });
-        let bind_group = render_state.get_device().create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Bind Group Main"),
-            layout: &bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: buffer_center_transform.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: buffer_draw_mode.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: buffer_color_map.as_entire_binding(),
-                },
-            ]
-        });
-
-        // The layout for the Buffer bind groups
-        let bind_group_origin_layout = render_state.get_device().create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Bind Group Origin Layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-        });
-
-        // Create shader
-        let shader = render_state.get_device().create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
-
-        // Create render pipeline
-        let pipeline_layout = render_state.get_device().create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Pipeline Layout Descriptor"),
-            bind_group_layouts: &[&bind_group_layout, &bind_group_origin_layout],
-            push_constant_ranges: &[],
-        });
-        let pipeline_fill = render_state.get_device().create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Render Pipeline Fill"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: "vs_main",
-                buffers: &[
-                    Vertex::desc_hex(),
-                    Vertex::desc_location(),
-                    Vertex::desc_id(),
-                ],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: "fs_main",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: render_state.get_config().format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })]
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview: None,
-        });
-        let pipeline_outline = render_state.get_device().create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Render Pipeline Fill"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: "vs_main",
-                buffers: &[
-                    Vertex::desc_hex(),
-                    Vertex::desc_location(),
-                    Vertex::desc_id(),
-                ],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: "fs_main",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: render_state.get_config().format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })]
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::LineStrip,
-                strip_index_format: Some(wgpu::IndexFormat::Uint16),
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview: None,
-        });
-
         Self {
+            size,
             view,
             map_buffer_size,
             transform,
-            buffer_chunk,
-            buffer_edge,
-            buffer_vertex,
-            buffer_center_transform,
-            buffer_draw_mode,
-            _buffer_color_map: buffer_color_map,
-            bind_group,
-            pipeline_fill,
-            pipeline_outline,
+            index_center,
+            index_size,
         }
     }
 
-    pub fn render(&self, render_state: &RenderState) -> Result<(), RenderError> {
-        // Set the transform
-        render_state.get_queue().write_buffer(&self.buffer_center_transform, 0, bytemuck::cast_slice(&self.transform.get_data_center_transform()));
-
-        // Get the current view
-        let output_texture = render_state.get_surface().get_current_texture()?;
-        let view = output_texture.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        
-        // Setup the load ops
-        let load_op_clear = wgpu::LoadOp::Clear(wgpu::Color {
-            r: 1.0,
-            g: 1.0,
-            b: 1.0,
-            a: 1.0,
-        });
-        let load_op_load = wgpu::LoadOp::Load;
-
-        // Do the rendering
-        self.render_single(DrawMode::Fill, load_op_clear, &view, render_state);
-        self.render_single(DrawMode::Outline, load_op_load, &view, render_state);
-
-        // Show to screen
-        output_texture.present();
-
-        Ok(())
-    }
-
-    fn render_single(&self, mode: DrawMode, load_op: wgpu::LoadOp<wgpu::Color>, view: &wgpu::TextureView, render_state: &RenderState) {
-        // Create the encoder
-        let mut encoder = render_state.get_device().create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Command Encoder"),
-        });
-
-        // Set the draw mode to fill
-        render_state.get_queue().write_buffer(&self.buffer_draw_mode, 0, bytemuck::cast_slice(&[mode.get_data()]));
-
-        // Initialize the render pass
-        {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                label: Some("Render Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: load_op,
-                        store: wgpu::StoreOp::Store,
-                    }
-                })],
-                depth_stencil_attachment: None,
-            });
-
-            // Set the pipeline for fill
-            match mode {
-                DrawMode::Fill => render_pass.set_pipeline(&self.pipeline_fill),
-                DrawMode::Outline => render_pass.set_pipeline(&self.pipeline_outline)
-            };
-            
-            // Set the main uniforms
-            render_pass.set_bind_group(0, &self.bind_group, &[]);
-
-            // Render the chunks
-            for chunk in &self.buffer_chunk {
-                chunk.draw(&self.transform.get_center(), mode, &mut render_pass, render_state)
-            }
-
-            // Render the edges
-            for edge_list in &self.buffer_edge {
-                for edge in edge_list {
-                    edge.draw(&self.transform.get_center(), mode, &mut render_pass, render_state)
-                }
-            }
-
-            // Render the vertices
-            for vertex_list in &self.buffer_vertex {
-                for vertex in vertex_list {
-                    vertex.draw(&self.transform.get_center(), mode, &mut render_pass, render_state)
-                }    
-            }
-        }
-
-        // Submit
-        render_state.get_queue().submit(std::iter::once(encoder.finish()));
-    }
-
-    fn chunk_index_to_pos(size: usize, coord: &Index) -> Point {
+    fn index_to_origin(size: usize, coord: &Index) -> Point {
         let x = SQRT_3 * ((coord.get_x() as f64) + (coord.get_y() as f64) / 2.0) * (size as f64);
         let y = (coord.get_y() as f64) * (size as f64) * 1.5;
         Point::new(x, y)
@@ -494,31 +181,55 @@ impl GPUMap {
     }
 }
 
-/// A buffer which can draw a group of hexagons like a chunk or edge
-/// 
-/// S: The number of hexagons in one element
-struct Buffer {
-    /// The number of hexagons
-    size: usize,
-    /// The origin of the hexagons (center coordinate is: location + origin)
-    origin_data: Point,
-    /// The locations of each of the hexagons
-    locations: wgpu::Buffer,
-    /// The id of each of the hexagons
-    ids: wgpu::Buffer,
-    /// The buffer to write origin to the gpu
-    origin: wgpu::Buffer,
-    /// The bind group for the origin
-    bind_group_origin: wgpu::BindGroup,
-    /// The buffer holding all of the vertex data for a hexagon
-    hex_vertices: wgpu::Buffer,
-    /// The buffer holding all of the bulk index data for a hexagon
-    hex_indices_bulk: wgpu::Buffer,
-    /// The buffer holding all of the edge index data for a hexagon
-    hex_indices_edge: wgpu::Buffer,
+impl GPUMapHexBuffers {
+    fn new(render_state: &RenderState) -> Self {
+        // Create the vertices
+        let vertices = render_state.get_device().create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Hex Vertex Buffer"),
+            contents: bytemuck::cast_slice(&Vertex::vertices_hex()),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        // Create the indices for the bulk
+        let indices_bulk = render_state.get_device().create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Hex Bulk Index Buffer"),
+            contents: bytemuck::cast_slice(&Vertex::indices_bulk_hex()),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        // Create the indices for the edges
+        let indices_edge = render_state.get_device().create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Hex Edge Index Buffer"),
+            contents: bytemuck::cast_slice(&Vertex::indices_edge_hex()),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        Self {
+            vertices,
+            indices_bulk,
+            indices_edge,
+        }
+    }
+
+    fn set<'a>(&'a self, mode: DrawMode, render_pass: &mut wgpu::RenderPass<'a>) -> u32 {
+        // Set the vertex buffer
+        render_pass.set_vertex_buffer(0, self.vertices.slice(..));
+
+        // Set the index buffer and return the number of indices
+        match mode {
+            DrawMode::Fill => {
+                render_pass.set_index_buffer(self.indices_bulk.slice(..), wgpu::IndexFormat::Uint16);
+                12
+            }
+            DrawMode::Outline => {
+                render_pass.set_index_buffer(self.indices_edge.slice(..), wgpu::IndexFormat::Uint16);
+                7
+            }
+        }
+    }
 }
 
-impl Buffer {
+impl GPUMapDataBuffer {
     /// Create a new buffer
     /// 
     /// # Parameters
@@ -530,45 +241,15 @@ impl Buffer {
     /// origin: The origin
     /// 
     /// render_state: The render state to use for rendering
-    fn new(locations: &[Point], ids: &[u32], origin: &Point, render_state: &RenderState) -> Self {
-        if cfg!(debug_assertions) && locations.len() != ids.len() {
-            panic!("The length of ids ({:?}) must be equal to that of locations ({:?})", ids.len(), locations.len());
-        }
-        
+    fn new(ids: &[u32], origin: &Point, render_state: &RenderState) -> Self {
         // Set the size and origin
-        let size = locations.len();
+        let size = ids.len();
         let origin_data = *origin;
         
-        // Create the hex buffers
-        let hex_vertices = render_state.get_device().create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Hex Vertex Buffer"),
-            contents: bytemuck::cast_slice(&Vertex::vertices_hex()),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-
-        let hex_indices_bulk = render_state.get_device().create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Hex Bulk Index Buffer"),
-            contents: bytemuck::cast_slice(&Vertex::indices_bulk_hex()),
-            usage: wgpu::BufferUsages::INDEX,
-        });
-
-        let hex_indices_edge = render_state.get_device().create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Hex Edge Index Buffer"),
-            contents: bytemuck::cast_slice(&Vertex::indices_edge_hex()),
-            usage: wgpu::BufferUsages::INDEX,
-        });
-
-        // Create the buffers for locations and ids
-        let locations = render_state.get_device().create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Location Buffer"),
-            contents: bytemuck::cast_slice(&Vertex::from_points(locations)),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-
         let ids = render_state.get_device().create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Location Buffer"),
             contents: bytemuck::cast_slice(ids),
-            usage: wgpu::BufferUsages::VERTEX,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
 
         // Get a buffer for the origin
@@ -579,25 +260,10 @@ impl Buffer {
             mapped_at_creation: false,
         });
 
-        // Create bind group for transform
-        let bind_group_origin_layout = render_state.get_device().create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Bind Group Origin Layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-        });
+        // Create bind group for origin
         let bind_group_origin = render_state.get_device().create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Bind Group Origin"),
-            layout: &bind_group_origin_layout,
+            layout: &Self::bind_group_layout(render_state),
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -609,13 +275,9 @@ impl Buffer {
         Self {
             size,
             origin_data,
-            locations,
             ids,
             origin,
             bind_group_origin,
-            hex_vertices,
-            hex_indices_bulk,
-            hex_indices_edge,
         }
     }
 
@@ -648,34 +310,544 @@ impl Buffer {
     /// render_pass: The render pass to render with
     /// 
     /// render_state: The render state to use for rendering
-    fn draw<'a>(&'a self, origin: &Point, mode: DrawMode, render_pass: &mut wgpu::RenderPass<'a>, render_state: &RenderState) {
+    fn draw<'a>(&'a self, origin: &Point, render_pass: &mut wgpu::RenderPass<'a>, render_state: &RenderState) {
         // Set the origin buffer
         render_state.get_queue().write_buffer(&self.origin, 0, bytemuck::cast_slice(&Vertex::from_points(&[self.origin_data - *origin])));
         
-        // Set the vertex buffer
-        render_pass.set_vertex_buffer(0, self.hex_vertices.slice(..));
-
-        // Set the index buffer
-        let vertex_count = match mode {
-            DrawMode::Fill => {
-                render_pass.set_index_buffer(self.hex_indices_bulk.slice(..), wgpu::IndexFormat::Uint16);
-                12
-            }
-            DrawMode::Outline => {
-                render_pass.set_index_buffer(self.hex_indices_edge.slice(..), wgpu::IndexFormat::Uint16);
-                7
-            }
-        };
-
         // Set instance data
-        render_pass.set_vertex_buffer(1, self.locations.slice(..));
         render_pass.set_vertex_buffer(2, self.ids.slice(..));
 
         // Set the origin
         render_pass.set_bind_group(1, &self.bind_group_origin, &[]);
+    }
 
-        // Draw the hexagons
-        render_pass.draw_indexed(0..vertex_count, 0, 0..self.size as u32);            
+    fn bind_group_layout(render_state: &RenderState) -> wgpu::BindGroupLayout {
+        render_state.get_device().create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Bind Group Origin Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        })
+    }
+}
+
+impl GPUMapDataBufferList {
+    fn new(locations: wgpu::Buffer, buffers: Vec<GPUMapDataBuffer>) -> Self {
+        Self {
+            locations,
+            buffers,
+        }
+    }
+
+    fn draw<'a>(&'a self, origin: &Point, vertex_count: u32, render_pass: &mut wgpu::RenderPass<'a>, render_state: &RenderState) {
+        // Set the locations
+        render_pass.set_vertex_buffer(1, self.locations.slice(..));
+
+        // Render the buffers            
+        for buffer in &self.buffers {                
+            // Set the specific data
+            buffer.draw(origin, render_pass, render_state);
+            
+            // Draw the hexagons
+            render_pass.draw_indexed(0..vertex_count, 0, 0..buffer.size as u32);            
+        }
+    }
+}
+
+impl GPUMapDataBuffers {
+    fn new<M: map::Map>(size: usize, view_data: &GPUMapView, map: &M, render_state: &RenderState) -> Self {
+        // Get locations for the chunk
+        let locations_chunk: Vec<Vertex> = [Vertex::from_point(&Point::new(0.0, 0.0))]
+            .into_iter()
+            .chain((1..size)
+            .map(|layer| {
+                (0..6)
+                    .map(|slice| {
+                        let (layer_dir, pos_dir) = match slice {
+                            0 => (Point::new(0.5 * SQRT_3, 0.5), Point::new(-0.5 * SQRT_3, 0.5)),
+                            1 => (Point::new(0.0, 1.0), Point::new(-0.5 * SQRT_3, -0.5)),
+                            2 => (Point::new(-0.5 * SQRT_3, 0.5), Point::new(0.0, -1.0)),
+                            3 => (Point::new(-0.5 * SQRT_3, -0.5), Point::new(0.5 * SQRT_3, -0.5)),
+                            4 => (Point::new(0.0, -1.0), Point::new(0.5 * SQRT_3, 0.5)),
+                            _ => (Point::new(0.5 * SQRT_3, -0.5), Point::new(0.0, 1.0)),
+                        };
+                        (0..layer)
+                            .map(|pos| {
+                                Vertex::from_point(&(layer_dir * (layer as f64) + pos_dir * (pos as f64)))
+                            })
+                            .collect::<Vec<Vertex>>()
+                            .into_iter()
+                    })
+                    .flatten()
+                    .collect::<Vec<Vertex>>()
+            })
+            .flatten())
+            .collect();
+        let locations_chunk = render_state.get_device().create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Location Buffer Chunk"),
+            contents: bytemuck::cast_slice(&locations_chunk),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        });
+
+        // Get locations for the edges
+        let locations_edge_0: Vec<Vertex> = (1..size).map(|pos| {
+            let start_pos = Point::new(-0.5 * SQRT_3 * (size as f64), -0.5 * (size as f64));
+            let dir = Point::new(0.0, 1.0);
+            Vertex::from_point(&(start_pos + dir * (pos as f64)))
+        }).collect();
+        let locations_edge_0 = render_state.get_device().create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Location Buffer Edge 0"),
+            contents: bytemuck::cast_slice(&locations_edge_0),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        });
+        let locations_edge_1: Vec<Vertex> = (1..size).map(|pos| {
+            let start_pos = Point::new(-0.5 * SQRT_3 * (size as f64), 0.5 * (size as f64));
+            let dir = Point::new(0.5 * SQRT_3, 0.5);
+            Vertex::from_point(&(start_pos + dir * (pos as f64)))
+        }).collect();
+        let locations_edge_1 = render_state.get_device().create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Location Buffer Edge 1"),
+            contents: bytemuck::cast_slice(&locations_edge_1),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        });
+        let locations_edge_2: Vec<Vertex> = (1..size).map(|pos| {
+            let start_pos = Point::new(0.0, size as f64);
+            let dir = Point::new(0.5 * SQRT_3, -0.5);
+            Vertex::from_point(&(start_pos + dir * (pos as f64)))
+        }).collect();
+        let locations_edge_2 = render_state.get_device().create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Location Buffer Edge 2"),
+            contents: bytemuck::cast_slice(&locations_edge_2),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        });
+        
+        // Get locations for the vertices
+        let locations_vertex_0 = vec![Vertex::from_point(&Point::new(-0.5 * SQRT_3 * (size as f64), -0.5 * (size as f64)))];
+        let locations_vertex_0 = render_state.get_device().create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Location Buffer Vertex 0"),
+            contents: bytemuck::cast_slice(&locations_vertex_0),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        });
+        let locations_vertex_1 = vec![Vertex::from_point(&Point::new(-0.5 * SQRT_3 * (size as f64), 0.5 * (size as f64)))];
+        let locations_vertex_1 = render_state.get_device().create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Location Buffer Vertex 1"),
+            contents: bytemuck::cast_slice(&locations_vertex_1),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let index_center = &view_data.index_center;
+        let index_size = &view_data.index_size;
+
+        // Get the chunks to load
+        let origins_chunk = (-index_size.get_y()..(index_size.get_y() + 1))
+            .map(|index_y| {
+                ((-(index_size.get_x() + index_y) / 2)..((index_size.get_x() - index_y) / 2 + 1))
+                    .map(|index_x| {
+                        Index::new(index_x + index_center.get_x(), index_y + index_center.get_y())
+                    })
+                    .collect::<Vec<Index>>()
+                    .into_iter()
+            })
+            .flatten();
+
+        // Get the edges to load
+        let origins_edge_0 = (-index_size.get_y()..(index_size.get_y() + 1))
+            .map(|index_y| {
+                ((-(index_size.get_x() - 1 + index_y) / 2)..((index_size.get_x() + 1 - index_y) / 2 + 1))
+                    .map(|index_x| {
+                        Index::new(index_x + index_center.get_x(), index_y + index_center.get_y())
+                    })
+                    .collect::<Vec<Index>>().into_iter()
+            })
+            .flatten();
+        let origins_edge_1 = (-index_size.get_y()..index_size.get_y())
+            .map(|index_y| {
+                ((-(index_size.get_x() - 1 + index_y) / 2)..((index_size.get_x() - index_y) / 2 + 1))
+                    .map(|index_x| {
+                        Index::new(index_x + index_center.get_x(), index_y + index_center.get_y())
+                    })
+                    .collect::<Vec<Index>>().into_iter()
+            })
+            .flatten();
+        let origins_edge_2 = (-index_size.get_y()..index_size.get_y())
+            .map(|index_y| {
+                ((-(index_size.get_x() + index_y) / 2)..((index_size.get_x() + 1 - index_y) / 2))
+                    .map(|index_x| {
+                        Index::new(index_x + index_center.get_x(), index_y + index_center.get_y())
+                    })
+                    .collect::<Vec<Index>>().into_iter()
+            })
+            .flatten();
+
+        // Get the vertices to load
+        let origins_vertex_0 = origins_edge_0.clone();
+        let origins_vertex_1 = origins_edge_0.clone();
+
+        // Setup the chunk buffer
+        let buffer_chunk = origins_chunk.map(|origin_index| {
+            GPUMapDataBuffer::new(&map.get_chunk(origin_index).get_id(), &GPUMapView::index_to_origin(size, &origin_index), render_state)
+        }).collect();
+        
+        // Setup the edge buffers
+        let buffer_edge_0 = origins_edge_0.map(|origin_index| {
+            GPUMapDataBuffer::new(&map.get_edge_vertical(origin_index).get_id(), &GPUMapView::index_to_origin(size, &origin_index), render_state)
+        }).collect();
+        let buffer_edge_1 = origins_edge_1.map(|origin_index| {
+            GPUMapDataBuffer::new(&map.get_edge_left(origin_index).get_id(), &GPUMapView::index_to_origin(size, &origin_index), render_state)
+        }).collect();
+        let buffer_edge_2 = origins_edge_2.map(|origin_index| {
+            GPUMapDataBuffer::new(&map.get_edge_right(origin_index).get_id(), &GPUMapView::index_to_origin(size, &origin_index), render_state)
+        }).collect();
+
+        // Setup the vertex buffers
+        let buffer_vertex_0 = origins_vertex_0.map(|origin_index| {
+            GPUMapDataBuffer::new(&map.get_vertex_bottom(origin_index).get_id(), &GPUMapView::index_to_origin(size, &origin_index), render_state)
+        }).collect();
+        let buffer_vertex_1 = origins_vertex_1.map(|origin_index| {
+            GPUMapDataBuffer::new(&map.get_vertex_top(origin_index).get_id(), &GPUMapView::index_to_origin(size, &origin_index), render_state)
+        }).collect();
+
+        // Package all of the data
+        let chunk = GPUMapDataBufferList::new(locations_chunk, buffer_chunk);
+        let edges = [
+            GPUMapDataBufferList::new(locations_edge_0, buffer_edge_0),
+            GPUMapDataBufferList::new(locations_edge_1, buffer_edge_1),
+            GPUMapDataBufferList::new(locations_edge_2, buffer_edge_2),
+        ];
+        let vertices = [
+            GPUMapDataBufferList::new(locations_vertex_0, buffer_vertex_0),
+            GPUMapDataBufferList::new(locations_vertex_1, buffer_vertex_1),
+        ];
+
+        Self {
+            chunk,
+            edges,
+            vertices,
+        }
+    }
+
+    fn draw<'a>(&'a self, origin: &Point, vertex_count: u32, render_pass: &mut wgpu::RenderPass<'a>, render_state: &RenderState) {
+        // Draw the chunks
+        self.chunk.draw(origin, vertex_count, render_pass, render_state);
+
+        // Draw the edges
+        self.edges.iter().for_each(|edge| {
+            edge.draw(origin, vertex_count, render_pass, render_state);
+        });
+
+        // Draw the vertices
+        self.vertices.iter().for_each(|vertex| {
+            vertex.draw(origin, vertex_count, render_pass, render_state);
+        });
+    }
+}
+
+impl GPUMapUniforms {
+    fn new(color_map: &ColorMap, render_state: &RenderState) -> Self {
+        // Create transform buffer
+        let center_transform = render_state.get_device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Transform Buffer"),
+            size: (mem::size_of::<f32>() * 4) as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Create draw mode buffer
+        let draw_mode = render_state.get_device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Draw Mode Buffer"),
+            size: std::mem::size_of::<u32>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        
+        // Create the color map
+        let color_map = render_state.get_device().create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Color Map Buffer"),
+            contents: bytemuck::cast_slice(color_map.get_data()),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        // Create bind group for the uniforms
+        let bind_group = render_state.get_device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Bind Group Main"),
+            layout: &Self::bind_group_layout(render_state),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: center_transform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: draw_mode.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: color_map.as_entire_binding(),
+                },
+            ]
+        });
+
+        Self {
+            center_transform,
+            draw_mode,
+            _color_map: color_map,
+            bind_group,
+        }
+    }
+
+    fn write_transform(&self, transform: &Transform2D, render_state: &RenderState) {
+        render_state.get_queue().write_buffer(&self.center_transform, 0, bytemuck::cast_slice(&transform.get_data_center_transform()));
+    }
+
+    fn write_draw_mode(&self, mode: DrawMode, render_state: &RenderState) {
+        render_state.get_queue().write_buffer(&self.draw_mode, 0, bytemuck::cast_slice(&[mode.get_data()]));
+    }
+
+    fn set<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {
+        render_pass.set_bind_group(0, &self.bind_group, &[]);
+    }
+
+    fn bind_group_layout(render_state: &RenderState) -> wgpu::BindGroupLayout {
+        render_state.get_device().create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Bind Group Main Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        })
+    }
+}
+
+impl GPUMapPipelines {
+    fn new(shader: wgpu::ShaderModuleDescriptor, render_state: &RenderState) -> Self {
+        // Create shader
+        let shader = render_state.get_device().create_shader_module(shader);
+
+        // Create render pipeline
+        let layout = render_state.get_device().create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Pipeline Layout Descriptor"),
+            bind_group_layouts: &[&GPUMapUniforms::bind_group_layout(render_state), &GPUMapDataBuffer::bind_group_layout(render_state)],
+            push_constant_ranges: &[],
+        });
+
+        // Create the fill pipeline
+        let fill = render_state.get_device().create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Render Pipeline Fill"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_main",
+                buffers: &[
+                    Vertex::desc_hex(),
+                    Vertex::desc_location(),
+                    Vertex::desc_id(),
+                ],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: render_state.get_config().format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })]
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+        });
+
+        // Create the outline pipeline
+        let outline = render_state.get_device().create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Render Pipeline Fill"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_main",
+                buffers: &[
+                    Vertex::desc_hex(),
+                    Vertex::desc_location(),
+                    Vertex::desc_id(),
+                ],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: render_state.get_config().format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })]
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineStrip,
+                strip_index_format: Some(wgpu::IndexFormat::Uint16),
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+        });
+
+        Self {
+            fill,
+            outline,
+        }
+    }
+
+    fn set<'a>(&'a self, mode: DrawMode, render_pass: &mut wgpu::RenderPass<'a>) {
+        match mode {
+            DrawMode::Fill => render_pass.set_pipeline(&self.fill),
+            DrawMode::Outline => render_pass.set_pipeline(&self.outline),
+        }
+    }
+}
+
+impl GPUMap {
+    pub fn new<M: map::Map>(size: usize, map_buffer_size: f64, transform: &Transform2D, color_map: &ColorMap, map: &M, shader: wgpu::ShaderModuleDescriptor, render_state: &RenderState) -> Self {                
+        // Create the fields
+        let view = GPUMapView::new(size, map_buffer_size, transform);
+        let hex_buffers = GPUMapHexBuffers::new(render_state);
+        let data_buffers = GPUMapDataBuffers::new(size, &view, map, render_state);
+        let uniforms = GPUMapUniforms::new(color_map, render_state);
+        let pipelines = GPUMapPipelines::new(shader, render_state);
+
+
+        Self {
+            view,
+            hex_buffers,
+            data_buffers,
+            uniforms,
+            pipelines,
+        }
+    }
+
+    pub fn render(&self, render_state: &RenderState) -> Result<(), RenderError> {
+        // Set the transform
+        self.uniforms.write_transform(&self.view.transform, render_state);
+
+        // Get the current view
+        let output_texture = render_state.get_surface().get_current_texture()?;
+        let view = output_texture.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        
+        // Setup the load ops
+        let load_op_clear = wgpu::LoadOp::Clear(wgpu::Color {
+            r: 1.0,
+            g: 1.0,
+            b: 1.0,
+            a: 1.0,
+        });
+        let load_op_load = wgpu::LoadOp::Load;
+
+        // Do the rendering
+        self.render_single(DrawMode::Fill, load_op_clear, &view, render_state);
+        self.render_single(DrawMode::Outline, load_op_load, &view, render_state);
+
+        // Show to screen
+        output_texture.present();
+
+        Ok(())
+    }
+
+    fn render_single(&self, mode: DrawMode, load_op: wgpu::LoadOp<wgpu::Color>, view: &wgpu::TextureView, render_state: &RenderState) {
+        // Create the encoder
+        let mut encoder = render_state.get_device().create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Command Encoder"),
+        });
+
+        // Set the draw mode to fill
+        self.uniforms.write_draw_mode(mode, render_state);
+
+        // Initialize the render pass
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                label: Some("Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: load_op,
+                        store: wgpu::StoreOp::Store,
+                    }
+                })],
+                depth_stencil_attachment: None,
+            });
+
+            // Set the pipeline for fill
+            self.pipelines.set(mode, &mut render_pass);
+
+            // Set the main uniforms
+            self.uniforms.set(&mut render_pass);
+
+            // Set the vertex buffer
+            let vertex_count = self.hex_buffers.set(mode, &mut render_pass);
+
+            // Draw everything
+            self.data_buffers.draw(self.view.transform.get_center(), vertex_count, &mut render_pass, render_state);
+        }
+
+        // Submit
+        render_state.get_queue().submit(std::iter::once(encoder.finish()));
     }
 }
 
@@ -767,6 +939,10 @@ impl Vertex {
     /// points: The points to convert
     fn from_points(points: &[Point]) -> Vec<Self> {
         points.iter().map(|point| Self { position: [point.get_x() as f32, point.get_y() as f32] }).collect()
+    }
+
+    fn from_point(point: &Point) -> Self {
+        Self { position: [point.get_x() as f32, point.get_y() as f32] }
     }
 }
 

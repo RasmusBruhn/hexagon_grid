@@ -11,7 +11,8 @@ use wasm_bindgen::prelude::*;
 use crate::types::{Point, Transform2D};
 
 use super::{
-    N,
+    N, COLOR_START, COLOR_END,
+    color::ColorMap,
     map,
     render::{RenderState, NewRenderStateError},
     gpu_map::{GPUMap, RenderError},
@@ -173,8 +174,11 @@ impl<M: map::Map> State<M> {
         // Initialize the render state
         let render_state = RenderState::new(&window).await?;
 
+        // Create the color map
+        let color_map = ColorMap::new_linear(&COLOR_START, &COLOR_END, N + 1);
+
         // Initialize the gpu map
-        let gpu_map = GPUMap::new(N, 2.0, &Transform2D::scale(&Point::new(0.1, 0.1)), &map, &render_state);
+        let gpu_map = GPUMap::new(N, 2.0, &Transform2D::scale(&Point::new(0.1, 0.1)), &color_map, &map, wgpu::include_wgsl!("shader.wgsl"), &render_state);
 
         Ok (Self {
             window,

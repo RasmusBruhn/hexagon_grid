@@ -569,13 +569,13 @@ impl Transform2D {
     }
 
     /// Retrieves the offset
-    pub fn get_center(&self) -> Point {
-        self.center
+    pub fn get_center(&self) -> &Point {
+        &self.center
     }
 
     /// Retrieves the center transform
-    pub fn get_center_transform(&self) -> Matrix {
-        self.center_transform
+    pub fn get_center_transform(&self) -> &Matrix {
+        &self.center_transform
     }
 
     /// Retrieves the data for the offset
