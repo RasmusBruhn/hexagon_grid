@@ -134,6 +134,15 @@ impl GPUMap {
         }
     }
 
+    /// Changes the transform by applying calculating t = t_new * t_old
+    /// 
+    /// # Parameters
+    /// 
+    /// transform: The new transform to add
+    pub fn change_transform(&mut self, transform: &Transform2D) {
+        self.view.change_transform(transform);
+    }
+
     /// Renders the entire scene
     /// 
     /// # Parameters
@@ -255,18 +264,24 @@ impl GPUMapView {
         let load_center = Self::index_to_origin(size, &index_center);
         let load_size = Self::size_index_to_size(size, &index_size);
         let view = View::new(&load_center, &load_size);
-
-        // Create transform
-        let transform = Transform2D::scale(&Point::new(0.25, 0.25)) * transform;
         
         Self {
             size,
             view,
             map_buffer_size,
-            transform,
+            transform: *transform,
             index_center,
             index_size,
         }
+    }
+
+    /// Changes the transform by applying calculating t = t_new * t_old
+    /// 
+    /// # Parameters
+    /// 
+    /// transform: The new transform to add
+    fn change_transform(&mut self, transform: &Transform2D) {
+        self.transform = transform * self.transform;
     }
 
     /// Converts a chunk index to the origin position of that chunk
@@ -848,6 +863,9 @@ impl GPUMapUniforms {
     /// 
     /// render_state: The render state to use for rendering
     fn write_transform(&self, transform: &Transform2D, render_state: &RenderState) {
+        // TODO: Remove this after testing
+        let transform = Transform2D::scale(&Point::new(0.25, 0.25)) * transform;
+
         render_state.get_queue().write_buffer(&self.center_transform, 0, bytemuck::cast_slice(&transform.get_data_center_transform()));
     }
 

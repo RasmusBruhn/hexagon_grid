@@ -2,7 +2,7 @@ use winit::{
     window::{Window, WindowBuilder},
     event_loop::{EventLoop, ControlFlow},
     dpi::PhysicalSize,
-    event::{Event, WindowEvent},
+    event::{Event, WindowEvent, KeyboardInput},
 };
 use thiserror::Error;
 #[cfg(target_arch="wasm32")]
@@ -196,8 +196,25 @@ impl<M: map::Map> State<M> {
             WindowEvent::ScaleFactorChanged { new_inner_size, .. } => {
                 self.resize(**new_inner_size);
             }
-            
+
+            WindowEvent::KeyboardInput { input, .. } => {
+                self.handle_keyboard_input(input, control_flow);
+            }
+
             _ => (),
+        }
+    }
+
+    /// Handle a keyb oard input
+    /// 
+    /// # Parameters
+    /// 
+    /// input: The input to handle
+    /// 
+    /// control_flow: The location to set the control flow
+    fn handle_keyboard_input(&mut self, input: &KeyboardInput, control_flow: &mut ControlFlow) {
+        if let Some(key) = input.virtual_keycode {
+            println!("Key pressed: {:?}", key);
         }
     }
 
