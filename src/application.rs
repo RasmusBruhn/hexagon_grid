@@ -7,11 +7,8 @@ use winit::{
 use thiserror::Error;
 #[cfg(target_arch="wasm32")]
 use wasm_bindgen::prelude::*;
-
-use crate::types::{Point, Transform2D};
-
 use super::{
-    N, COLOR_START, COLOR_END,
+    types::{Point, Transform2D},
     color::ColorMap,
     map,
     render::{RenderState, NewRenderStateError},
@@ -23,8 +20,10 @@ use super::{
 /// # Parameters
 /// 
 /// map: The map used for this application
+/// 
+/// color_map: The coolor map for rendering
 #[cfg_attr(target_arch="wasm32", wasm_bindgen(start))]
-pub async fn run<M: map::Map + 'static>(map: M) {
+pub async fn run<M: map::Map + 'static>(map: M, color_map: ColorMap) {
     // Setup logging
     cfg_if::cfg_if! {
         if #[cfg(target_arch = "wasm32")] {
@@ -66,7 +65,7 @@ pub async fn run<M: map::Map + 'static>(map: M) {
     }    
     
     // Create the state
-    let state = State::new(window, map).await;
+    let state = State::new(window, map, color_map).await;
     let mut state = match state {
         Ok(state) => state,
         Err(error) => {
@@ -78,70 +77,7 @@ pub async fn run<M: map::Map + 'static>(map: M) {
     // Run the event loop
     event_loop.run(move |event, _, control_flow| state.handle_event(&event, control_flow));
 }
-/*
-/// Handles an event passed from winit
-/// 
-/// # Parameters
-/// 
-/// event: The window event that has occured, the window id should already have been tested\
-/// control_flow: The control flow for the event loop\
-/// state: The state of the application
-fn event_handler<M: map::Map>(event: &Event<'_, ()>, control_flow: &mut ControlFlow, state: &mut RenderState, gpu_map: &mut GPUMap<M>) {
-    match event {
-        // Run the window event handler
-        Event::WindowEvent { window_id, event } => if *window_id == state.window.id() {
-            event_window_handler(event, control_flow, state);
-        }
 
-        // Render the screen
-        Event::RedrawRequested(window_id) => if *window_id == state.window.id() {
-            match state.render() {
-                Ok(_) => {}
-
-                // Reconfigure the surface if lost
-                Err(wgpu::SurfaceError::Lost) => state.resize(state.size),
-
-                // The system is out of memory, we should probably quit
-                Err(wgpu::SurfaceError::OutOfMemory) => {
-                    *control_flow = ControlFlow::Exit;
-                    eprintln!("System is out of memory")
-                }
-
-                // All other errors (Outdated, Timeout) should be resolved by the next frame
-                Err(e) => eprintln!("Error while rendering: {:?}", e),
-            }
-        }
-
-        _ => ()
-    }
-}
-
-/// Handles a window event for the main window
-/// 
-/// # Parameters
-/// 
-/// event: The window event that has occured, the window id should already have been tested\
-/// control_flow: The control flow for the event loop\
-/// state: The state of the application
-fn event_window_handler(event: &WindowEvent<'_>, control_flow: &mut ControlFlow, state: &mut State) {
-    match event {
-        // Close the window
-        WindowEvent::CloseRequested => *control_flow = ControlFlow::Exit,
-
-        // The size of the window has changed
-        WindowEvent::Resized(physical_size) => {
-            state.resize(*physical_size);
-        }
-
-        // The window has been dragged into an area with a different scale factor
-        WindowEvent::ScaleFactorChanged { new_inner_size, .. } => {
-            state.resize(**new_inner_size);
-        }
-        
-        _ => (),
-    }
-}
-*/
 /// Holds the state of the application
 struct State<M: map::Map> {
     /// The main window
@@ -161,9 +97,16 @@ impl<M: map::Map> State<M> {
     /// 
     /// # Parameters
     /// 
-    /// window: The window to use for the application\
+    /// window: The window to use for the application
+    /// 
     /// map: The map to render
-    async fn new(window: Window, map: M) -> Result<Self, NewStateError> {
+    /// 
+    /// color_map: The color map for rendering
+    /// 
+    /// # Errors
+    /// 
+    /// See NewStateError for the possible errors
+    async fn new(window: Window, map: M, color_map: ColorMap) -> Result<Self, NewStateError> {
         // Get the size of the window
         let size = window.inner_size();
 
@@ -174,11 +117,8 @@ impl<M: map::Map> State<M> {
         // Initialize the render state
         let render_state = RenderState::new(&window).await?;
 
-        // Create the color map
-        let color_map = ColorMap::new_linear(&COLOR_START, &COLOR_END, N + 1);
-
         // Initialize the gpu map
-        let gpu_map = GPUMap::new(N, 2.0, &Transform2D::scale(&Point::new(0.1, 0.1)), &color_map, &map, wgpu::include_wgsl!("shader.wgsl"), &render_state);
+        let gpu_map = GPUMap::new(2.0, &Transform2D::scale(&Point::new(0.1, 0.1)), &color_map, &map, wgpu::include_wgsl!("shader.wgsl"), &render_state);
 
         Ok (Self {
             window,
@@ -190,10 +130,21 @@ impl<M: map::Map> State<M> {
     }
 
     /// Render the screen
+    /// 
+    /// # Errors
+    /// 
+    /// See gpu_map::RenderError for the possible errors
     fn render(&self) -> Result<(), RenderError> {
-        self.gpu_map.render(&self.render_state)
+        self.gpu_map.draw(&self.render_state)
     }
 
+    /// Handles all events from winit
+    /// 
+    /// # Parameters
+    /// 
+    /// event: The event to handle
+    /// 
+    /// control_flow: The location to set the control flow
     fn handle_event(&mut self, event: &Event<'_, ()>, control_flow: &mut ControlFlow) {
         match event {
             // Run the window event handler
@@ -224,6 +175,13 @@ impl<M: map::Map> State<M> {
         }
     }
 
+    /// Handle a window event
+    /// 
+    /// # Parameters
+    /// 
+    /// event: The event to handle
+    /// 
+    /// control_flow: The location to set the control flow
     fn handle_window_event(&mut self, event: &WindowEvent<'_>, control_flow: &mut ControlFlow) {
         match event {
             // Close the window
@@ -257,10 +215,13 @@ impl<M: map::Map> State<M> {
     }
 }
 
+/// The error types for when creating a new state
 #[derive(Error, Debug, Clone)]
 pub enum NewStateError {
+    /// The width or height of the window is too small
     #[error("The width and height of the window must be larger than 0 but received {:?}", .0)]
     InvalidSize(PhysicalSize<u32>),
+    /// The render state could not be created
     #[error("Unable to initialize the render state: {:?}", 0.)]
     RenderInitError(NewRenderStateError),
 }

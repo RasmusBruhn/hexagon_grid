@@ -39,10 +39,8 @@ impl Point {
         [self.x as f32, self.y as f32]
     }
 
+    /// Converts it to a size
     pub fn to_size(&self) -> Size {
-        if cfg!(debug_assertions) && (self.x < 0.0 || self.y < 0.0) {
-            panic!("The coordinates must not be negative when converting to a size but received: {:?}", *self);
-        }
         Size::new(self.x, self.y)
     }
 }
@@ -231,7 +229,7 @@ impl Mul<&f64> for &Point {
     }
 }
 
-/// A 2D point
+/// A 2D size of width and height which are both non-negative
 #[derive(Clone, Copy, Debug)]
 pub struct Size {
     /// The width
@@ -241,7 +239,7 @@ pub struct Size {
 }
 
 impl Size {
-    /// Creates a new size
+    /// Creates a new size, if any of width or height are negative their signs are flipped
     /// 
     /// # Parameters
     /// 
@@ -281,9 +279,68 @@ impl Mul<f64> for Size {
     type Output = Size;
 
     fn mul(self, rhs: f64) -> Self::Output {
+        let rhs = if rhs < 0.0 {
+            -rhs
+        } else {
+            rhs
+        };
         let w = self.w * rhs;
         let h = self.h * rhs;
         Self {
+            w,
+            h,
+        }
+    }
+}
+
+impl Mul<&f64> for Size {
+    type Output = Size;
+
+    fn mul(self, rhs: &f64) -> Self::Output {
+        let rhs = if *rhs < 0.0 {
+            -*rhs
+        } else {
+            *rhs
+        };
+        let w = self.w * rhs;
+        let h = self.h * rhs;
+        Self {
+            w,
+            h,
+        }
+    }
+}
+
+impl Mul<f64> for &Size {
+    type Output = Size;
+
+    fn mul(self, rhs: f64) -> Self::Output {
+        let rhs = if rhs < 0.0 {
+            -rhs
+        } else {
+            rhs
+        };
+        let w = self.w * rhs;
+        let h = self.h * rhs;
+        Size {
+            w,
+            h,
+        }
+    }
+}
+
+impl Mul<&f64> for &Size {
+    type Output = Size;
+
+    fn mul(self, rhs: &f64) -> Self::Output {
+        let rhs = if *rhs < 0.0 {
+            -*rhs
+        } else {
+            *rhs
+        };
+        let w = self.w * rhs;
+        let h = self.h * rhs;
+        Size {
             w,
             h,
         }
@@ -298,6 +355,48 @@ impl Add<Size> for Size {
         let h = self.h + rhs.h;
 
         Self {
+            w,
+            h,
+        }
+    }
+}
+
+impl Add<&Size> for Size {
+    type Output = Size;
+
+    fn add(self, rhs: &Size) -> Self::Output {
+        let w = self.w + rhs.w;
+        let h = self.h + rhs.h;
+
+        Self {
+            w,
+            h,
+        }
+    }
+}
+
+impl Add<Size> for &Size {
+    type Output = Size;
+
+    fn add(self, rhs: Size) -> Self::Output {
+        let w = self.w + rhs.w;
+        let h = self.h + rhs.h;
+
+        Size {
+            w,
+            h,
+        }
+    }
+}
+
+impl Add<&Size> for &Size {
+    type Output = Size;
+
+    fn add(self, rhs: &Size) -> Self::Output {
+        let w = self.w + rhs.w;
+        let h = self.h + rhs.h;
+
+        Size {
             w,
             h,
         }
@@ -356,10 +455,10 @@ impl View {
     /// center: The center of the rectangle
     /// 
     /// size: The size of the rectangle
-    pub fn new(center: Point, size: Size) -> Self {
+    pub fn new(center: &Point, size: &Size) -> Self {
         Self {
-            center,
-            size,
+            center: *center,
+            size: *size,
         }
     }
 
@@ -377,6 +476,7 @@ impl View {
 /// Defines a 2x2 matrix
 #[derive(Clone, Copy, Debug)]
 pub struct Matrix {
+    /// The values of the matrix
     values: [[f64; 2]; 2],
 }
 
@@ -480,10 +580,22 @@ impl Mul<Point> for Matrix {
     }
 }
 
-/// A 2D transform which acts on Point types, including rotation, scaling and translation
+/// A 2D transform which acts on Point types, including rotation, scaling and translation.
+/// 
+/// The operation is y = r * (x - c) where
+/// 
+/// y: The output point
+/// 
+/// x: The input point
+/// 
+/// c: The center point
+/// 
+/// r: The 2x2 center_transform matrix
 #[derive(Copy, Clone, Debug)]
 pub struct Transform2D {
+    /// The transform to apply relative to the center
     center_transform: Matrix,
+    /// The center of the coordinate system
     center: Point,
 }
 
@@ -507,7 +619,7 @@ impl Transform2D {
 
         Self { center_transform, center }
     }
-    // r * (x - c) + c = r * (x - c + r^-1 * c)
+
     /// Rotate around center
     /// 
     /// # Parameters
