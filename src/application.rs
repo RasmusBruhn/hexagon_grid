@@ -2,9 +2,10 @@ use winit::{
     window::{Window, WindowBuilder},
     event_loop::{EventLoop, ControlFlow},
     dpi::PhysicalSize,
-    event::{Event, WindowEvent, KeyboardInput},
+    event::{Event, WindowEvent, KeyboardInput, VirtualKeyCode, ElementState},
 };
 use thiserror::Error;
+use std::time::{Instant, Duration};
 #[cfg(target_arch="wasm32")]
 use wasm_bindgen::prelude::*;
 use super::{
@@ -13,6 +14,7 @@ use super::{
     map,
     render::{RenderState, NewRenderStateError},
     gpu_map::{GPUMap, RenderError},
+    camera::Camera,
 };
 
 /// Runs the application
@@ -22,8 +24,10 @@ use super::{
 /// map: The map used for this application
 /// 
 /// color_map: The coolor map for rendering
+/// 
+/// framerate: The wanted framerate
 #[cfg_attr(target_arch="wasm32", wasm_bindgen(start))]
-pub async fn run<M: map::Map + 'static>(map: M, color_map: ColorMap) {
+pub async fn run<M: map::Map + 'static>(map: M, color_map: ColorMap, framerate: f64) {
     // Setup logging
     cfg_if::cfg_if! {
         if #[cfg(target_arch = "wasm32")] {
@@ -65,7 +69,7 @@ pub async fn run<M: map::Map + 'static>(map: M, color_map: ColorMap) {
     }    
     
     // Create the state
-    let state = State::new(window, map, color_map).await;
+    let state = State::new(window, map, color_map, framerate).await;
     let mut state = match state {
         Ok(state) => state,
         Err(error) => {
@@ -84,12 +88,18 @@ struct State<M: map::Map> {
     window: Window,
     /// The render state
     render_state: RenderState,
+    /// The camera
+    camera: Camera,
     /// The inner size of the window
     size: PhysicalSize<u32>,
     /// The map of hexagons
     _map: M,
     /// The gpu map
     gpu_map: GPUMap,
+    /// The wanted framerate
+    framerate: f64,
+    /// The timestamp in milliseconds for the last frame
+    last_time: Instant,
 }
 
 impl<M: map::Map> State<M> {
@@ -103,10 +113,12 @@ impl<M: map::Map> State<M> {
     /// 
     /// color_map: The color map for rendering
     /// 
+    /// framerate: The wanted framerate
+    /// 
     /// # Errors
     /// 
     /// See NewStateError for the possible errors
-    async fn new(window: Window, map: M, color_map: ColorMap) -> Result<Self, NewStateError> {
+    async fn new(window: Window, map: M, color_map: ColorMap, framerate: f64) -> Result<Self, NewStateError> {
         // Get the size of the window
         let size = window.inner_size();
 
@@ -117,15 +129,24 @@ impl<M: map::Map> State<M> {
         // Initialize the render state
         let render_state = RenderState::new(&window).await?;
 
+        // Initialize the camera
+        let camera = Camera::new(60.0, &Transform2D::scale(&Point::new(0.1, 0.1)), &size);
+
         // Initialize the gpu map
-        let gpu_map = GPUMap::new(2.0, &Transform2D::scale(&Point::new(0.1, 0.1)), &color_map, &map, wgpu::include_wgsl!("shader.wgsl"), &render_state);
+        let gpu_map = GPUMap::new(2.0, &camera.get_transform(), &color_map, &map, wgpu::include_wgsl!("shader.wgsl"), &render_state);
+
+        // Get the current time
+        let last_time = Instant::now();
 
         Ok (Self {
             window,
             render_state,
+            camera,
             size,
             _map: map,
             gpu_map,
+            framerate,
+            last_time,
         })
     }
 
@@ -135,7 +156,17 @@ impl<M: map::Map> State<M> {
     /// 
     /// See gpu_map::RenderError for the possible errors
     fn render(&self) -> Result<(), RenderError> {
-        self.gpu_map.draw(&self.render_state)
+        // Get the current view
+        let output_texture = self.render_state.get_surface().get_current_texture()?;
+        let view = output_texture.texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Draw the map
+        self.gpu_map.draw(&view, &self.render_state)?;
+
+        // Show to screen
+        output_texture.present();
+
+        Ok(())
     }
 
     /// Handles all events from winit
@@ -169,6 +200,23 @@ impl<M: map::Map> State<M> {
                     // All other errors (Outdated, Timeout) should be resolved by the next frame
                     Err(e) => eprintln!("Error while rendering: {:?}", e),
                 }
+            }
+
+            Event::MainEventsCleared => {
+                // Update the camera
+                if self.camera.update_transform() {
+                    self.camera_changed()
+                }
+
+                // Limit the framerate
+                let new_time = Instant::now();
+                let wait_time = if 1e6 / self.framerate > (new_time.duration_since(self.last_time).as_micros() as f64) {
+                    (1e6 / self.framerate - (new_time.duration_since(self.last_time).as_micros() as f64)) as u64
+                } else {
+                    0
+                };
+                *control_flow = ControlFlow::WaitUntil(new_time + Duration::from_micros(wait_time));
+                self.last_time = new_time;
             }
     
             _ => ()
@@ -213,8 +261,27 @@ impl<M: map::Map> State<M> {
     /// 
     /// control_flow: The location to set the control flow
     fn handle_keyboard_input(&mut self, input: &KeyboardInput, control_flow: &mut ControlFlow) {
-        if let Some(key) = input.virtual_keycode {
-            println!("Key pressed: {:?}", key);
+        // Get whether it is pressed
+        let pressed = if let ElementState::Pressed = input.state {
+            true
+        } else {
+            false
+        };
+        
+        if let Some(keycode) = input.virtual_keycode {
+            match keycode {
+                VirtualKeyCode::D => self.camera.set_move(0, pressed),
+                VirtualKeyCode::E => self.camera.set_move(1, pressed),
+                VirtualKeyCode::W => self.camera.set_move(2, pressed),
+                VirtualKeyCode::A => self.camera.set_move(3, pressed),
+                VirtualKeyCode::Z => self.camera.set_move(4, pressed),
+                VirtualKeyCode::X => self.camera.set_move(5, pressed),
+                VirtualKeyCode::S => self.camera.set_zoom(0, pressed),
+                VirtualKeyCode::Q => self.camera.set_zoom(1, pressed),
+                VirtualKeyCode::R => self.camera.set_rotate(0, pressed),
+                VirtualKeyCode::C => self.camera.set_rotate(1, pressed),
+                _ => (),
+            }    
         }
     }
 
@@ -229,6 +296,16 @@ impl<M: map::Map> State<M> {
             self.size = new_size;
             self.render_state.resize(new_size);
         }
+
+        // Update the camera
+        self.camera.resize(&new_size);
+        self.camera_changed();
+    }
+
+    /// Updates the rendering when the camera changed
+    fn camera_changed(&mut self) {
+        self.gpu_map.set_transform(&self.camera.get_transform(), &self.render_state);
+        self.window.request_redraw();
     }
 }
 

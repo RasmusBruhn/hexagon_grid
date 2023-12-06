@@ -125,6 +125,9 @@ impl GPUMap {
         let uniforms = GPUMapUniforms::new(color_map, render_state);
         let pipelines = GPUMapPipelines::new(shader, render_state);
 
+        // Set the transform
+        uniforms.write_transform(transform, render_state);
+
         Self {
             view,
             hex_buffers,
@@ -134,47 +137,42 @@ impl GPUMap {
         }
     }
 
-    /// Changes the transform by applying calculating t = t_new * t_old
+    /// Sets the transform
     /// 
     /// # Parameters
     /// 
-    /// transform: The new transform to add
-    pub fn change_transform(&mut self, transform: &Transform2D) {
-        self.view.change_transform(transform);
+    /// transform: The new transform
+    /// 
+    /// render_state: The render state to use for rendering
+    pub fn set_transform(&mut self, transform: &Transform2D, render_state: &RenderState) {
+        self.view.set_transform(transform);
+        self.uniforms.write_transform(transform, render_state);
     }
 
     /// Renders the entire scene
     /// 
     /// # Parameters
     /// 
+    /// view: The view to render to
+    /// 
     /// render_state: The render state to use for rendering
     /// 
     /// # Errors
     /// 
     /// See RenderError for a description of the errors
-    pub fn draw(&self, render_state: &RenderState) -> Result<(), RenderError> {
-        // Set the transform
-        self.uniforms.write_transform(&self.view.transform, render_state);
-
-        // Get the current view
-        let output_texture = render_state.get_surface().get_current_texture()?;
-        let view = output_texture.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        
+    pub fn draw(&self, view: &wgpu::TextureView, render_state: &RenderState) -> Result<(), RenderError> {
         // Setup the load ops
         let load_op_clear = wgpu::LoadOp::Clear(wgpu::Color {
             r: 1.0,
             g: 1.0,
             b: 1.0,
             a: 1.0,
-        });
+        }); // TODO: Remove
         let load_op_load = wgpu::LoadOp::Load;
 
         // Do the rendering
         self.draw_single(DrawMode::Fill, load_op_clear, &view, render_state);
         self.draw_single(DrawMode::Outline, load_op_load, &view, render_state);
-
-        // Show to screen
-        output_texture.present();
 
         Ok(())
     }
@@ -275,13 +273,13 @@ impl GPUMapView {
         }
     }
 
-    /// Changes the transform by applying calculating t = t_new * t_old
+    /// Sets the new transform
     /// 
     /// # Parameters
     /// 
-    /// transform: The new transform to add
-    fn change_transform(&mut self, transform: &Transform2D) {
-        self.transform = transform * self.transform;
+    /// transform: The new transform
+    fn set_transform(&mut self, transform: &Transform2D) {
+        self.transform = *transform;
     }
 
     /// Converts a chunk index to the origin position of that chunk
@@ -978,7 +976,7 @@ impl GPUMapPipelines {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
+                cull_mode: Some(wgpu::Face::Front),
                 polygon_mode: wgpu::PolygonMode::Fill,
                 unclipped_depth: false,
                 conservative: false,
