@@ -471,6 +471,13 @@ impl View {
     pub fn get_size(&self) -> &Size {
         &self.size
     }
+
+    pub fn contains(&self, other: &View) -> bool {
+        self.center.x - self.size.w * 0.5 <= other.center.x - other.size.w * 0.5 &&
+        self.center.y - self.size.h * 0.5 <= other.center.y - other.size.h * 0.5 &&
+        self.center.x + self.size.w * 0.5 >= other.center.x + other.size.w * 0.5 &&
+        self.center.y + self.size.h * 0.5 >= other.center.y + other.size.h * 0.5
+    }
 }
 
 /// Defines a 2x2 matrix

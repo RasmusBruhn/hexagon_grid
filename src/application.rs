@@ -93,7 +93,7 @@ struct State<M: map::Map> {
     /// The inner size of the window
     size: PhysicalSize<u32>,
     /// The map of hexagons
-    _map: M,
+    map: M,
     /// The gpu map
     gpu_map: GPUMap,
     /// The wanted framerate
@@ -143,7 +143,7 @@ impl<M: map::Map> State<M> {
             render_state,
             camera,
             size,
-            _map: map,
+            map,
             gpu_map,
             framerate,
             last_time,
@@ -304,7 +304,7 @@ impl<M: map::Map> State<M> {
 
     /// Updates the rendering when the camera changed
     fn camera_changed(&mut self) {
-        self.gpu_map.set_transform(&self.camera.get_transform(), &self.render_state);
+        self.gpu_map.set_transform(&self.camera.get_transform(), &self.map, &self.render_state);
         self.window.request_redraw();
     }
 }

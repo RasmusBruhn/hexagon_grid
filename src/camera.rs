@@ -146,7 +146,7 @@ impl Camera {
         }
 
         // Calculate the movement direction
-        let move_val = 6.0 / self.framerate;
+        let move_val = 4.0 / self.framerate;
         let key_move = [
             Point::new(1.0, 0.0),
             Point::new(0.5, -0.5 * SQRT_3),
@@ -171,7 +171,7 @@ impl Camera {
         }
 
         // Calculate the zoom direction
-        let zoom_val = 1.0 + 1.5 / self.framerate;
+        let zoom_val = 1.0 + 1.2 / self.framerate;
         let key_zoom = [
             zoom_val,
             1.0 / zoom_val,
@@ -189,7 +189,7 @@ impl Camera {
             .fold(1.0, |prev, next| prev * next);
 
         // Calculate the rotation direction
-        let rotate_val = 1.3 / self.framerate;
+        let rotate_val = 1.0 / self.framerate;
         let key_rotate = [
             rotate_val,
             -rotate_val,
