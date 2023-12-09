@@ -64,7 +64,7 @@ struct GPUMapDataBufferList {
     /// The locations buffer
     locations: wgpu::Buffer,
     /// The buffers for id and origin
-    buffers: Vec<GPUMapDataBuffer>,
+    buffers: Vec<Box<GPUMapDataBuffer>>,
 }
 
 /// Holds the data for rendering one part of the map, a single chunk, edge or vertex
@@ -294,6 +294,8 @@ impl GPUMapView {
             let render_view = View::new(new_view.get_center(), &(new_view.get_size() * self.map_buffer_size));
 
             // Get the center index and index size
+            let old_index_center = self.index_center;
+            let old_index_size = self.index_size;
             self.index_center = Self::get_center_index(self.size, render_view.get_center());
             self.index_size = Self::get_size_index(self.size, render_view.get_size());
 
@@ -302,13 +304,19 @@ impl GPUMapView {
             let load_size = Self::size_index_to_size(self.size, &self.index_size);
             self.view = View::new(&load_center, &load_size);
 
-            Some(self.loaded_chunks()) // TODO: Only reload what is needed
+            Some(self.loaded_chunks(&old_index_center, &old_index_size))
         }
     }
 
     /// Retrieves which chunks to load
-    fn loaded_chunks(&self) -> LoadedIndices {
-        let chunk: Vec<Index>  = (-self.index_size.get_y()..(self.index_size.get_y() + 1))
+    /// 
+    /// # Parameters
+    /// 
+    /// index_center: The old center index
+    /// 
+    /// index_size: The old index size
+    fn loaded_chunks(&self, index_center: &Index, index_size: &Index) -> LoadedIndices {
+        let chunk  = (-self.index_size.get_y()..(self.index_size.get_y() + 1))
             .map(|index_y| {
                 ((-(self.index_size.get_x() + index_y) / 2)..((self.index_size.get_x() - index_y) / 2 + 1))
                     .map(|index_x| {
@@ -318,10 +326,17 @@ impl GPUMapView {
                     .into_iter()
             })
             .flatten()
+            .map(|index| {
+                if let Some(id) = Self::index_to_id(index_center, index_size, &index, DataType::Chunk) {
+                    ReloadType::Reuse(id)
+                } else {
+                    ReloadType::Load(index)
+                }
+            })
             .collect();
 
         // Get the edges to load
-        let edge_0: Vec<Index>  = (-self.index_size.get_y()..self.index_size.get_y())
+        let edge_0 = (-self.index_size.get_y()..self.index_size.get_y())
             .map(|index_y| {
                 ((-(self.index_size.get_x() + index_y) / 2)..((self.index_size.get_x() + 1 - index_y) / 2))
                     .map(|index_x| {
@@ -330,8 +345,15 @@ impl GPUMapView {
                     .collect::<Vec<Index>>().into_iter()
             })
             .flatten()
+            .map(|index| {
+                if let Some(id) = Self::index_to_id(index_center, index_size, &index, DataType::EdgeRight) {
+                    ReloadType::Reuse(id)
+                } else {
+                    ReloadType::Load(index)
+                }
+            })
             .collect();
-        let edge_1: Vec<Index>  = (-self.index_size.get_y()..self.index_size.get_y())
+        let edge_1 = (-self.index_size.get_y()..self.index_size.get_y())
             .map(|index_y| {
                 ((-(self.index_size.get_x() - 1 + index_y) / 2)..((self.index_size.get_x() - index_y) / 2 + 1))
                     .map(|index_x| {
@@ -340,8 +362,15 @@ impl GPUMapView {
                     .collect::<Vec<Index>>().into_iter()
             })
             .flatten()
+            .map(|index| {
+                if let Some(id) = Self::index_to_id(index_center, index_size, &index, DataType::EdgeLeft) {
+                    ReloadType::Reuse(id)
+                } else {
+                    ReloadType::Load(index)
+                }
+            })
             .collect();
-        let edge_2: Vec<Index> = (-self.index_size.get_y()..(self.index_size.get_y() + 1))
+        let edge_2 = (-self.index_size.get_y()..(self.index_size.get_y() + 1))
             .map(|index_y| {
                 ((-(self.index_size.get_x() - 1 + index_y) / 2)..((self.index_size.get_x() + 1 - index_y) / 2 + 1))
                     .map(|index_x| {
@@ -350,11 +379,50 @@ impl GPUMapView {
                     .collect::<Vec<Index>>().into_iter()
             })
             .flatten()
+            .map(|index| {
+                if let Some(id) = Self::index_to_id(index_center, index_size, &index, DataType::EdgeVertical) {
+                    ReloadType::Reuse(id)
+                } else {
+                    ReloadType::Load(index)
+                }
+            })
             .collect();
 
         // Get the vertices to load
-        let vertex_0: Vec<Index>  = edge_2.clone();
-        let vertex_1: Vec<Index>  = edge_2.clone();
+        let vertex_0 = (-self.index_size.get_y()..(self.index_size.get_y() + 1))
+            .map(|index_y| {
+                ((-(self.index_size.get_x() - 1 + index_y) / 2)..((self.index_size.get_x() + 1 - index_y) / 2 + 1))
+                    .map(|index_x| {
+                        Index::new(index_x + self.index_center.get_x(), index_y + self.index_center.get_y())
+                    })
+                    .collect::<Vec<Index>>().into_iter()
+            })
+            .flatten()
+            .map(|index| {
+                if let Some(id) = Self::index_to_id(index_center, index_size, &index, DataType::VertexTop) {
+                    ReloadType::Reuse(id)
+                } else {
+                    ReloadType::Load(index)
+                }
+            })
+            .collect();
+        let vertex_1 = (-self.index_size.get_y()..(self.index_size.get_y() + 1))
+            .map(|index_y| {
+                ((-(self.index_size.get_x() - 1 + index_y) / 2)..((self.index_size.get_x() + 1 - index_y) / 2 + 1))
+                    .map(|index_x| {
+                        Index::new(index_x + self.index_center.get_x(), index_y + self.index_center.get_y())
+                    })
+                    .collect::<Vec<Index>>().into_iter()
+            })
+            .flatten()
+            .map(|index| {
+                if let Some(id) = Self::index_to_id(index_center, index_size, &index, DataType::VertexBottom) {
+                    ReloadType::Reuse(id)
+                } else {
+                    ReloadType::Load(index)
+                }
+            })
+            .collect();
 
         LoadedIndices {
             size: self.size,
@@ -364,11 +432,40 @@ impl GPUMapView {
         }
     }
     
-    fn index_to_id(&self, index: &Index) {
-        let id_y = index.get_y() - (self.index_center.get_y() - self.index_size.get_y());
-        let id_x = index.get_x() - (self.index_center.get_x() - self.index_size.get_x() + id_y) / 2;
+    /// Calculates the id in the buffer vector given the index of the buffer, None if it is not loaded
+    /// 
+    /// # Parameters
+    /// 
+    /// index: The index of the buffer in question
+    /// 
+    /// data_type: What type of buffer it is
+    /// 
+    /// index_center: The index of the center
+    /// 
+    /// index_size: The index size
+    fn index_to_id(index_center: &Index, index_size: &Index, index: &Index, data_type: DataType) -> Option<usize> {
+        // Get the id relative to the first loaded id
+        let loc_y = index.get_y() - index_center.get_y();
+        let id_y = index.get_y() - data_type.y_start(index_center.get_y(), index_size.get_y());
+        let id_x = index.get_x() - data_type.x_start(index_center.get_x(), index_size.get_x(), loc_y);
+
+        // Get the length of the rows for even and odd rows
+        let even_count = data_type.width_even(index_size.get_x());
+        let odd_count = data_type.width_odd(index_size.get_x());
+
+        // Check if it is within
+        if id_y < 0 || id_y >= data_type.height(index_size.get_y()) || id_x < 0 || ((loc_y % 2 == 0 && id_x >= even_count) || (loc_y % 2 == 1 && id_x >= odd_count)) {
+            return None;
+        }
         
-        
+        // Get the id
+        let id = if index_size.get_y() % 2 == 0 {
+            even_count * ((id_y + 1) / 2) + odd_count * (id_y / 2)
+        } else {
+            odd_count * ((id_y + 1) / 2) + even_count * (id_y / 2)
+        } + id_x;
+
+        Some(id as usize)
     }
 
     /// Converts a chunk index to the origin position of that chunk
@@ -610,30 +707,36 @@ impl GPUMapDataBuffers {
         });
 
         // Get the loaded indices
-        let loaded_indices = view_data.loaded_chunks();
+        let loaded_indices = view_data.loaded_chunks(&Index::new(0, 0), &Index::new(0, -1));
 
         // Setup the chunk buffer
         let buffer_chunk = loaded_indices.chunk.iter().map(|origin_index| {
-            GPUMapDataBuffer::new(&map.get_chunk(&origin_index).get_id(), &GPUMapView::index_to_origin(size, &origin_index), render_state)
+            let index = origin_index.expect_load();
+            Box::new(GPUMapDataBuffer::new(&map.get_chunk(index).get_id(), &GPUMapView::index_to_origin(size, index), render_state))
         }).collect();
         
         // Setup the edge buffers
         let buffer_edge_0 = loaded_indices.edges[0].iter().map(|origin_index| {
-            GPUMapDataBuffer::new(&map.get_edge_right(&origin_index).get_id(), &GPUMapView::index_to_origin(size, &origin_index), render_state)
+            let index = origin_index.expect_load();
+            Box::new(GPUMapDataBuffer::new(&map.get_edge_right(index).get_id(), &GPUMapView::index_to_origin(size, index), render_state))
         }).collect();
         let buffer_edge_1 = loaded_indices.edges[1].iter().map(|origin_index| {
-            GPUMapDataBuffer::new(&map.get_edge_left(&origin_index).get_id(), &GPUMapView::index_to_origin(size, &origin_index), render_state)
+            let index = origin_index.expect_load();
+            Box::new(GPUMapDataBuffer::new(&map.get_edge_left(index).get_id(), &GPUMapView::index_to_origin(size, index), render_state))
         }).collect();
         let buffer_edge_2 = loaded_indices.edges[2].iter().map(|origin_index| {
-            GPUMapDataBuffer::new(&map.get_edge_vertical(&origin_index).get_id(), &GPUMapView::index_to_origin(size, &origin_index), render_state)
+            let index = origin_index.expect_load();
+            Box::new(GPUMapDataBuffer::new(&map.get_edge_vertical(index).get_id(), &GPUMapView::index_to_origin(size, index), render_state))
         }).collect();
 
         // Setup the vertex buffers
         let buffer_vertex_0 = loaded_indices.vertices[0].iter().map(|origin_index| {
-            GPUMapDataBuffer::new(&map.get_vertex_top(&origin_index).get_id(), &GPUMapView::index_to_origin(size, &origin_index), render_state)
+            let index = origin_index.expect_load();
+            Box::new(GPUMapDataBuffer::new(&map.get_vertex_top(index).get_id(), &GPUMapView::index_to_origin(size, index), render_state))
         }).collect();
         let buffer_vertex_1 = loaded_indices.vertices[1].iter().map(|origin_index| {
-            GPUMapDataBuffer::new(&map.get_vertex_bottom(&origin_index).get_id(), &GPUMapView::index_to_origin(size, &origin_index), render_state)
+            let index = origin_index.expect_load();
+            Box::new(GPUMapDataBuffer::new(&map.get_vertex_bottom(index).get_id(), &GPUMapView::index_to_origin(size, index), render_state))
         }).collect();
 
         // Package all of the data
@@ -667,26 +770,44 @@ impl GPUMapDataBuffers {
     fn reload<M: map::Map>(&mut self, loaded_indices: &LoadedIndices, map: &M, render_state: &RenderState) {
         // Setup the chunk buffer
         self.chunk.buffers = loaded_indices.chunk.iter().map(|origin_index| {
-            GPUMapDataBuffer::new(&map.get_chunk(&origin_index).get_id(), &GPUMapView::index_to_origin(loaded_indices.size, &origin_index), render_state)
+            match origin_index {
+                ReloadType::Load(index) => Box::new(GPUMapDataBuffer::new(&map.get_chunk(index).get_id(), &GPUMapView::index_to_origin(loaded_indices.size, index), render_state)),
+                ReloadType::Reuse(id) => self.chunk.buffers[*id].,
+            }
         }).collect();
         
         // Setup the edge buffers
         self.edges[0].buffers = loaded_indices.edges[0].iter().map(|origin_index| {
-            GPUMapDataBuffer::new(&map.get_edge_right(&origin_index).get_id(), &GPUMapView::index_to_origin(loaded_indices.size, &origin_index), render_state)
+            match origin_index {
+                ReloadType::Load(index) => Box::new(GPUMapDataBuffer::new(&map.get_edge_right(index).get_id(), &GPUMapView::index_to_origin(loaded_indices.size, index), render_state)),
+                ReloadType::Reuse(id) => self.chunk.buffers[*id],
+            }
         }).collect();
         self.edges[1].buffers = loaded_indices.edges[1].iter().map(|origin_index| {
-            GPUMapDataBuffer::new(&map.get_edge_left(&origin_index).get_id(), &GPUMapView::index_to_origin(loaded_indices.size, &origin_index), render_state)
+            match origin_index {
+                ReloadType::Load(index) => Box::new(GPUMapDataBuffer::new(&map.get_edge_left(index).get_id(), &GPUMapView::index_to_origin(loaded_indices.size, index), render_state)),
+                ReloadType::Reuse(id) => self.chunk.buffers[*id],
+            }
         }).collect();
         self.edges[2].buffers = loaded_indices.edges[2].iter().map(|origin_index| {
-            GPUMapDataBuffer::new(&map.get_edge_vertical(&origin_index).get_id(), &GPUMapView::index_to_origin(loaded_indices.size, &origin_index), render_state)
+            match origin_index {
+                ReloadType::Load(index) => Box::new(GPUMapDataBuffer::new(&map.get_edge_vertical(index).get_id(), &GPUMapView::index_to_origin(loaded_indices.size, index), render_state)),
+                ReloadType::Reuse(id) => self.chunk.buffers[*id],
+            }
         }).collect();
 
         // Setup the vertex buffers
         self.vertices[0].buffers = loaded_indices.vertices[0].iter().map(|origin_index| {
-            GPUMapDataBuffer::new(&map.get_vertex_top(&origin_index).get_id(), &GPUMapView::index_to_origin(loaded_indices.size, &origin_index), render_state)
+            match origin_index {
+                ReloadType::Load(index) => Box::new(GPUMapDataBuffer::new(&map.get_vertex_top(index).get_id(), &GPUMapView::index_to_origin(loaded_indices.size, index), render_state)),
+                ReloadType::Reuse(id) => self.chunk.buffers[*id],
+            }
         }).collect();
         self.vertices[1].buffers = loaded_indices.vertices[1].iter().map(|origin_index| {
-            GPUMapDataBuffer::new(&map.get_vertex_bottom(&origin_index).get_id(), &GPUMapView::index_to_origin(loaded_indices.size, &origin_index), render_state)
+            match origin_index {
+                ReloadType::Load(index) => Box::new(GPUMapDataBuffer::new(&map.get_vertex_bottom(index).get_id(), &GPUMapView::index_to_origin(loaded_indices.size, index), render_state)),
+                ReloadType::Reuse(id) => self.chunk.buffers[*id],
+            }
         }).collect();
     }
 
@@ -725,7 +846,7 @@ impl GPUMapDataBufferList {
     /// locations: The locations of each tile relative to the chunk origin
     /// 
     /// buffers: All the instances of this group of tiles
-    fn new(locations: wgpu::Buffer, buffers: Vec<GPUMapDataBuffer>) -> Self {
+    fn new(locations: wgpu::Buffer, buffers: Vec<Box<GPUMapDataBuffer>>) -> Self {
         Self {
             locations,
             buffers,
@@ -1243,11 +1364,124 @@ impl DrawMode {
     }
 }
 
+/// Helper enum for convertex index to id of buffers, defines what kind of buffer is chosen
+#[derive(Clone, Copy, Debug)]
+enum DataType {
+    Chunk,
+    EdgeRight,
+    EdgeLeft,
+    EdgeVertical,
+    VertexTop,
+    VertexBottom,
+}
+
+impl DataType {
+    /// Finds the lowest loaded y-index
+    /// 
+    /// # Parameters
+    /// 
+    /// index_center: The y-index of the center of the loaded region
+    /// 
+    /// index_size: The y-index size of the loaded region
+    fn y_start(&self, index_center: i64, index_size: i64) -> i64 {
+        index_center - index_size
+    }
+
+    /// Finds the lowest loaded x-index for the given y-layer
+    /// 
+    /// # Parameters
+    /// 
+    /// index_center: The x-index of the center of the loaded region
+    /// 
+    /// index_size: The x-index size of the loaded region
+    /// 
+    /// y: The y-value of the row to calculate for relative to the center
+    fn x_start(&self, index_center: i64, index_size: i64, y: i64) -> i64 {
+        let offset = match *self {
+            Self::EdgeLeft => 1,
+            Self::EdgeVertical => 1,
+            Self::VertexTop => 1,
+            Self::VertexBottom => 1,
+            _ => 0,
+        };
+        index_center - ((index_size + y - offset) / 2)
+    }
+
+    /// The number of buffers in an even row
+    /// 
+    /// # Parameters
+    /// 
+    /// index_size: The x-index size of the loaded region
+    fn width_even(&self, index_size: i64) -> i64 {
+        match *self {
+            Self::Chunk => 1 + 2 * (index_size / 2),
+            Self::EdgeRight => index_size,
+            Self::EdgeLeft => index_size,
+            Self::EdgeVertical => 2 * ((index_size + 1) / 2),
+            Self::VertexTop => 2 * ((index_size + 1) / 2),
+            Self::VertexBottom => 2 * ((index_size + 1) / 2),
+        }
+    }
+
+    /// The number of buffers in an odd row
+    /// 
+    /// # Parameters
+    /// 
+    /// index_size: The x-index size of the loaded region
+    fn width_odd(&self, index_size: i64) -> i64 {
+        match *self {
+            Self::Chunk => 2 * ((index_size + 1) / 2),
+            Self::EdgeRight => index_size,
+            Self::EdgeLeft => index_size,
+            Self::EdgeVertical => 1 + 2 * (index_size / 2),
+            Self::VertexTop => 1 + 2 * (index_size / 2),
+            Self::VertexBottom => 1 + 2 * (index_size / 2),
+        }
+    }
+
+    /// The number of layers in the loaded region
+    /// 
+    /// # Parameters
+    /// 
+    /// index_size: The y-index size of the loaded region
+    fn height(&self, index_size: i64) -> i64 {
+        2 * index_size + match *self {
+            Self::EdgeLeft => 0,
+            Self::EdgeRight => 0,
+            _ => 1,
+        }
+    }
+}
+
+/// Tells whether to load a new buffer or reuse an already loaded buffer
+#[derive(Clone, Copy, Debug)]
+enum ReloadType {
+    /// Load a new buffer, the given index is the buffer to load
+    Load(Index),
+    /// Reuse an existing buffer, the given id is the id in the old vector for this buffer
+    Reuse(usize),
+}
+
+impl ReloadType {
+    fn expect_load(&self) -> &Index {
+        match self {
+            Self::Load(index) => index,
+            Self::Reuse(_) => panic!("Expected load type but received reuse"),
+        }
+    } 
+}
+
+/// Contains all the buffers to load
+#[derive(Clone, Debug)]
 struct LoadedIndices {
+    /// The size of a chunk
     size: usize,
-    chunk: Vec<Index>,
-    edges: [Vec<Index>; 3],
-    vertices: [Vec<Index>; 2],
+    /// The chunk buffers
+    chunk: Vec<ReloadType>,
+    /// The edge buffers
+    edges: [Vec<ReloadType>; 3],
+    /// The vertex buffers
+    vertices: [Vec<ReloadType>; 2],
 }
 
 /// Used to describe errors when rendering
