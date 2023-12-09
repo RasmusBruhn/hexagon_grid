@@ -368,6 +368,7 @@ impl GPUMapView {
         let id_y = index.get_y() - (self.index_center.get_y() - self.index_size.get_y());
         let id_x = index.get_x() - (self.index_center.get_x() - self.index_size.get_x() + id_y) / 2;
         
+        
     }
 
     /// Converts a chunk index to the origin position of that chunk
