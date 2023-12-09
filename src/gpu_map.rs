@@ -306,6 +306,70 @@ impl GPUMapView {
         }
     }
 
+    /// Retrieves which chunks to load
+    fn loaded_chunks(&self) -> LoadedIndices {
+        let chunk: Vec<Index>  = (-self.index_size.get_y()..(self.index_size.get_y() + 1))
+            .map(|index_y| {
+                ((-(self.index_size.get_x() + index_y) / 2)..((self.index_size.get_x() - index_y) / 2 + 1))
+                    .map(|index_x| {
+                        Index::new(index_x + self.index_center.get_x(), index_y + self.index_center.get_y())
+                    })
+                    .collect::<Vec<Index>>()
+                    .into_iter()
+            })
+            .flatten()
+            .collect();
+
+        // Get the edges to load
+        let edge_0: Vec<Index>  = (-self.index_size.get_y()..self.index_size.get_y())
+            .map(|index_y| {
+                ((-(self.index_size.get_x() + index_y) / 2)..((self.index_size.get_x() + 1 - index_y) / 2))
+                    .map(|index_x| {
+                        Index::new(index_x + self.index_center.get_x(), index_y + self.index_center.get_y())
+                    })
+                    .collect::<Vec<Index>>().into_iter()
+            })
+            .flatten()
+            .collect();
+        let edge_1: Vec<Index>  = (-self.index_size.get_y()..self.index_size.get_y())
+            .map(|index_y| {
+                ((-(self.index_size.get_x() - 1 + index_y) / 2)..((self.index_size.get_x() - index_y) / 2 + 1))
+                    .map(|index_x| {
+                        Index::new(index_x + self.index_center.get_x(), index_y + self.index_center.get_y())
+                    })
+                    .collect::<Vec<Index>>().into_iter()
+            })
+            .flatten()
+            .collect();
+        let edge_2: Vec<Index> = (-self.index_size.get_y()..(self.index_size.get_y() + 1))
+            .map(|index_y| {
+                ((-(self.index_size.get_x() - 1 + index_y) / 2)..((self.index_size.get_x() + 1 - index_y) / 2 + 1))
+                    .map(|index_x| {
+                        Index::new(index_x + self.index_center.get_x(), index_y + self.index_center.get_y())
+                    })
+                    .collect::<Vec<Index>>().into_iter()
+            })
+            .flatten()
+            .collect();
+
+        // Get the vertices to load
+        let vertex_0: Vec<Index>  = edge_2.clone();
+        let vertex_1: Vec<Index>  = edge_2.clone();
+
+        LoadedIndices {
+            size: self.size,
+            chunk,
+            edges: [edge_0, edge_1, edge_2],
+            vertices: [vertex_0, vertex_1],
+        }
+    }
+    
+    fn index_to_id(&self, index: &Index) {
+        let id_y = index.get_y() - (self.index_center.get_y() - self.index_size.get_y());
+        let id_x = index.get_x() - (self.index_center.get_x() - self.index_size.get_x() + id_y) / 2;
+        
+    }
+
     /// Converts a chunk index to the origin position of that chunk
     /// 
     /// # Parameters
@@ -388,63 +452,6 @@ impl GPUMapView {
         let w = (size_index.get_x() as f64) * SQRT_3 * (size as f64);
         let h = ((size_index.get_y() as f64) * 3.0 + 1.0) * (size as f64);
         Size::new(w, h)
-    }
-
-    fn loaded_chunks(&self) -> LoadedIndices {
-        let chunk: Vec<Index>  = (-self.index_size.get_y()..(self.index_size.get_y() + 1))
-            .map(|index_y| {
-                ((-(self.index_size.get_x() + index_y) / 2)..((self.index_size.get_x() - index_y) / 2 + 1))
-                    .map(|index_x| {
-                        Index::new(index_x + self.index_center.get_x(), index_y + self.index_center.get_y())
-                    })
-                    .collect::<Vec<Index>>()
-                    .into_iter()
-            })
-            .flatten()
-            .collect();
-
-        // Get the edges to load
-        let edge_0: Vec<Index>  = (-self.index_size.get_y()..self.index_size.get_y())
-            .map(|index_y| {
-                ((-(self.index_size.get_x() + index_y) / 2)..((self.index_size.get_x() + 1 - index_y) / 2))
-                    .map(|index_x| {
-                        Index::new(index_x + self.index_center.get_x(), index_y + self.index_center.get_y())
-                    })
-                    .collect::<Vec<Index>>().into_iter()
-            })
-            .flatten()
-            .collect();
-        let edge_1: Vec<Index>  = (-self.index_size.get_y()..self.index_size.get_y())
-            .map(|index_y| {
-                ((-(self.index_size.get_x() - 1 + index_y) / 2)..((self.index_size.get_x() - index_y) / 2 + 1))
-                    .map(|index_x| {
-                        Index::new(index_x + self.index_center.get_x(), index_y + self.index_center.get_y())
-                    })
-                    .collect::<Vec<Index>>().into_iter()
-            })
-            .flatten()
-            .collect();
-        let edge_2: Vec<Index> = (-self.index_size.get_y()..(self.index_size.get_y() + 1))
-            .map(|index_y| {
-                ((-(self.index_size.get_x() - 1 + index_y) / 2)..((self.index_size.get_x() + 1 - index_y) / 2 + 1))
-                    .map(|index_x| {
-                        Index::new(index_x + self.index_center.get_x(), index_y + self.index_center.get_y())
-                    })
-                    .collect::<Vec<Index>>().into_iter()
-            })
-            .flatten()
-            .collect();
-
-        // Get the vertices to load
-        let vertex_0: Vec<Index>  = edge_2.clone();
-        let vertex_1: Vec<Index>  = edge_2.clone();
-
-        LoadedIndices {
-            size: self.size,
-            chunk,
-            edges: [edge_0, edge_1, edge_2],
-            vertices: [vertex_0, vertex_1],
-        }
     }
 }
 
