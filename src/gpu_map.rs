@@ -64,7 +64,7 @@ struct GPUMapDataBufferList {
     /// The locations buffer
     locations: wgpu::Buffer,
     /// The buffers for id and origin
-    buffers: Vec<Box<GPUMapDataBuffer>>,
+    buffers: Vec<Option<Box<GPUMapDataBuffer>>>,
 }
 
 /// Holds the data for rendering one part of the map, a single chunk, edge or vertex
@@ -454,7 +454,7 @@ impl GPUMapView {
         let odd_count = data_type.width_odd(index_size.get_x());
 
         // Check if it is within
-        if id_y < 0 || id_y >= data_type.height(index_size.get_y()) || id_x < 0 || ((loc_y % 2 == 0 && id_x >= even_count) || (loc_y % 2 == 1 && id_x >= odd_count)) {
+        if id_y < 0 || id_y >= data_type.height(index_size.get_y()) || id_x < 0 || ((loc_y % 2 == 0 && id_x >= even_count) || (loc_y % 2 != 0 && id_x >= odd_count)) {
             return None;
         }
         
@@ -712,31 +712,31 @@ impl GPUMapDataBuffers {
         // Setup the chunk buffer
         let buffer_chunk = loaded_indices.chunk.iter().map(|origin_index| {
             let index = origin_index.expect_load();
-            Box::new(GPUMapDataBuffer::new(&map.get_chunk(index).get_id(), &GPUMapView::index_to_origin(size, index), render_state))
+            Some(Box::new(GPUMapDataBuffer::new(&map.get_chunk(index).get_id(), &GPUMapView::index_to_origin(size, index), render_state)))
         }).collect();
         
         // Setup the edge buffers
         let buffer_edge_0 = loaded_indices.edges[0].iter().map(|origin_index| {
             let index = origin_index.expect_load();
-            Box::new(GPUMapDataBuffer::new(&map.get_edge_right(index).get_id(), &GPUMapView::index_to_origin(size, index), render_state))
+            Some(Box::new(GPUMapDataBuffer::new(&map.get_edge_right(index).get_id(), &GPUMapView::index_to_origin(size, index), render_state)))
         }).collect();
         let buffer_edge_1 = loaded_indices.edges[1].iter().map(|origin_index| {
             let index = origin_index.expect_load();
-            Box::new(GPUMapDataBuffer::new(&map.get_edge_left(index).get_id(), &GPUMapView::index_to_origin(size, index), render_state))
+            Some(Box::new(GPUMapDataBuffer::new(&map.get_edge_left(index).get_id(), &GPUMapView::index_to_origin(size, index), render_state)))
         }).collect();
         let buffer_edge_2 = loaded_indices.edges[2].iter().map(|origin_index| {
             let index = origin_index.expect_load();
-            Box::new(GPUMapDataBuffer::new(&map.get_edge_vertical(index).get_id(), &GPUMapView::index_to_origin(size, index), render_state))
+            Some(Box::new(GPUMapDataBuffer::new(&map.get_edge_vertical(index).get_id(), &GPUMapView::index_to_origin(size, index), render_state)))
         }).collect();
 
         // Setup the vertex buffers
         let buffer_vertex_0 = loaded_indices.vertices[0].iter().map(|origin_index| {
             let index = origin_index.expect_load();
-            Box::new(GPUMapDataBuffer::new(&map.get_vertex_top(index).get_id(), &GPUMapView::index_to_origin(size, index), render_state))
+            Some(Box::new(GPUMapDataBuffer::new(&map.get_vertex_top(index).get_id(), &GPUMapView::index_to_origin(size, index), render_state)))
         }).collect();
         let buffer_vertex_1 = loaded_indices.vertices[1].iter().map(|origin_index| {
             let index = origin_index.expect_load();
-            Box::new(GPUMapDataBuffer::new(&map.get_vertex_bottom(index).get_id(), &GPUMapView::index_to_origin(size, index), render_state))
+            Some(Box::new(GPUMapDataBuffer::new(&map.get_vertex_bottom(index).get_id(), &GPUMapView::index_to_origin(size, index), render_state)))
         }).collect();
 
         // Package all of the data
@@ -771,42 +771,46 @@ impl GPUMapDataBuffers {
         // Setup the chunk buffer
         self.chunk.buffers = loaded_indices.chunk.iter().map(|origin_index| {
             match origin_index {
-                ReloadType::Load(index) => Box::new(GPUMapDataBuffer::new(&map.get_chunk(index).get_id(), &GPUMapView::index_to_origin(loaded_indices.size, index), render_state)),
-                ReloadType::Reuse(id) => self.chunk.buffers[*id].,
+                ReloadType::Load(index) => {
+                    Some(Box::new(GPUMapDataBuffer::new(&map.get_chunk(index).get_id(), &GPUMapView::index_to_origin(loaded_indices.size, index), render_state)))
+                }
+                ReloadType::Reuse(id) => {
+                    self.chunk.buffers[*id].take()
+                }
             }
         }).collect();
         
         // Setup the edge buffers
         self.edges[0].buffers = loaded_indices.edges[0].iter().map(|origin_index| {
             match origin_index {
-                ReloadType::Load(index) => Box::new(GPUMapDataBuffer::new(&map.get_edge_right(index).get_id(), &GPUMapView::index_to_origin(loaded_indices.size, index), render_state)),
-                ReloadType::Reuse(id) => self.chunk.buffers[*id],
+                ReloadType::Load(index) => Some(Box::new(GPUMapDataBuffer::new(&map.get_edge_right(index).get_id(), &GPUMapView::index_to_origin(loaded_indices.size, index), render_state))),
+                ReloadType::Reuse(id) => self.edges[0].buffers[*id].take(),
             }
         }).collect();
         self.edges[1].buffers = loaded_indices.edges[1].iter().map(|origin_index| {
             match origin_index {
-                ReloadType::Load(index) => Box::new(GPUMapDataBuffer::new(&map.get_edge_left(index).get_id(), &GPUMapView::index_to_origin(loaded_indices.size, index), render_state)),
-                ReloadType::Reuse(id) => self.chunk.buffers[*id],
+                ReloadType::Load(index) => Some(Box::new(GPUMapDataBuffer::new(&map.get_edge_left(index).get_id(), &GPUMapView::index_to_origin(loaded_indices.size, index), render_state))),
+                ReloadType::Reuse(id) => self.edges[1].buffers[*id].take(),
             }
         }).collect();
         self.edges[2].buffers = loaded_indices.edges[2].iter().map(|origin_index| {
             match origin_index {
-                ReloadType::Load(index) => Box::new(GPUMapDataBuffer::new(&map.get_edge_vertical(index).get_id(), &GPUMapView::index_to_origin(loaded_indices.size, index), render_state)),
-                ReloadType::Reuse(id) => self.chunk.buffers[*id],
+                ReloadType::Load(index) => Some(Box::new(GPUMapDataBuffer::new(&map.get_edge_vertical(index).get_id(), &GPUMapView::index_to_origin(loaded_indices.size, index), render_state))),
+                ReloadType::Reuse(id) => self.edges[2].buffers[*id].take(),
             }
         }).collect();
 
         // Setup the vertex buffers
         self.vertices[0].buffers = loaded_indices.vertices[0].iter().map(|origin_index| {
             match origin_index {
-                ReloadType::Load(index) => Box::new(GPUMapDataBuffer::new(&map.get_vertex_top(index).get_id(), &GPUMapView::index_to_origin(loaded_indices.size, index), render_state)),
-                ReloadType::Reuse(id) => self.chunk.buffers[*id],
+                ReloadType::Load(index) => Some(Box::new(GPUMapDataBuffer::new(&map.get_vertex_top(index).get_id(), &GPUMapView::index_to_origin(loaded_indices.size, index), render_state))),
+                ReloadType::Reuse(id) => self.vertices[0].buffers[*id].take(),
             }
         }).collect();
         self.vertices[1].buffers = loaded_indices.vertices[1].iter().map(|origin_index| {
             match origin_index {
-                ReloadType::Load(index) => Box::new(GPUMapDataBuffer::new(&map.get_vertex_bottom(index).get_id(), &GPUMapView::index_to_origin(loaded_indices.size, index), render_state)),
-                ReloadType::Reuse(id) => self.chunk.buffers[*id],
+                ReloadType::Load(index) => Some(Box::new(GPUMapDataBuffer::new(&map.get_vertex_bottom(index).get_id(), &GPUMapView::index_to_origin(loaded_indices.size, index), render_state))),
+                ReloadType::Reuse(id) => self.vertices[1].buffers[*id].take(),
             }
         }).collect();
     }
@@ -846,7 +850,7 @@ impl GPUMapDataBufferList {
     /// locations: The locations of each tile relative to the chunk origin
     /// 
     /// buffers: All the instances of this group of tiles
-    fn new(locations: wgpu::Buffer, buffers: Vec<Box<GPUMapDataBuffer>>) -> Self {
+    fn new(locations: wgpu::Buffer, buffers: Vec<Option<Box<GPUMapDataBuffer>>>) -> Self {
         Self {
             locations,
             buffers,
@@ -869,12 +873,14 @@ impl GPUMapDataBufferList {
         render_pass.set_vertex_buffer(1, self.locations.slice(..));
 
         // Render the buffers            
-        for buffer in &self.buffers {                
-            // Set the specific data
-            buffer.set(origin, render_pass, render_state);
-            
-            // Draw the hexagons
-            render_pass.draw_indexed(0..vertex_count, 0, 0..buffer.size as u32);            
+        for buffer in &self.buffers { 
+            if let Some(buffer) = buffer {
+                // Set the specific data
+                buffer.set(origin, render_pass, render_state);
+                
+                // Draw the hexagons
+                render_pass.draw_indexed(0..vertex_count, 0, 0..buffer.size as u32);            
+            }               
         }
     }
 }
@@ -960,7 +966,7 @@ impl GPUMapDataBuffer {
     /// render_state: The render state to use for rendering
     fn set<'a>(&'a self, origin: &Point, render_pass: &mut wgpu::RenderPass<'a>, render_state: &RenderState) {
         // Set the origin buffer
-        render_state.get_queue().write_buffer(&self.origin, 0, bytemuck::cast_slice(&Vertex::from_points(&[self.origin_data - *origin])));
+        render_state.get_queue().write_buffer(&self.origin, 0, bytemuck::cast_slice(&[Vertex::from_point(&(self.origin_data - *origin))]));
         
         // Set instance data
         render_pass.set_vertex_buffer(2, self.ids.slice(..));
@@ -1062,7 +1068,7 @@ impl GPUMapUniforms {
     /// render_state: The render state to use for rendering
     fn write_transform(&self, transform: &Transform2D, render_state: &RenderState) {
         // TODO: Remove this after testing
-        let transform = Transform2D::scale(&Point::new(0.25, 0.25)) * transform;
+        let transform = Transform2D::scale(&Point::new(0.05, 0.05)) * transform;
 
         render_state.get_queue().write_buffer(&self.center_transform, 0, bytemuck::cast_slice(&transform.get_data_center_transform()));
     }
@@ -1176,7 +1182,7 @@ impl GPUMapPipelines {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Front),
+                cull_mode: Some(wgpu::Face::Back),
                 polygon_mode: wgpu::PolygonMode::Fill,
                 unclipped_depth: false,
                 conservative: false,

@@ -130,7 +130,7 @@ impl<M: map::Map> State<M> {
         let render_state = RenderState::new(&window).await?;
 
         // Initialize the camera
-        let camera = Camera::new(60.0, &Transform2D::scale(&Point::new(0.1, 0.1)), &size);
+        let camera = Camera::new(60.0, &Transform2D::scale(&Point::new(0.5, 0.5)), &size);
 
         // Initialize the gpu map
         let gpu_map = GPUMap::new(2.0, &camera.get_transform(), &color_map, &map, wgpu::include_wgsl!("shader.wgsl"), &render_state);

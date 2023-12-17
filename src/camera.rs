@@ -149,11 +149,11 @@ impl Camera {
         let move_val = 4.0 / self.framerate;
         let key_move = [
             Point::new(1.0, 0.0),
-            Point::new(0.5, -0.5 * SQRT_3),
-            Point::new(-0.5, -0.5 * SQRT_3),
-            Point::new(-1.0, 0.0),
-            Point::new(-0.5, 0.5 * SQRT_3),
             Point::new(0.5, 0.5 * SQRT_3),
+            Point::new(-0.5, 0.5 * SQRT_3),
+            Point::new(-1.0, 0.0),
+            Point::new(-0.5, -0.5 * SQRT_3),
+            Point::new(0.5, -0.5 * SQRT_3),
         ];
         let mut move_dir = self.move_active
             .iter()
@@ -191,15 +191,15 @@ impl Camera {
         // Calculate the rotation direction
         let rotate_val = 1.0 / self.framerate;
         let key_rotate = [
-            rotate_val,
             -rotate_val,
+            rotate_val,
         ];
         let rotate_dir = self.rotate_active
             .iter()
             .zip(key_rotate.iter())
-            .filter_map(|(&active, zoom)| {
+            .filter_map(|(&active, rotate)| {
                 if active {
-                    Some(zoom)
+                    Some(rotate)
                 } else {
                     None
                 }
@@ -220,6 +220,6 @@ impl Camera {
     /// 
     /// size: The size of the window
     fn size_to_aspect(size: &winit::dpi::PhysicalSize<u32>) -> Transform2D {
-        Transform2D::scale(&Point::new((size.height as f64) / (size.width as f64), -1.0))
+        Transform2D::scale(&Point::new((size.height as f64) / (size.width as f64), 1.0))
     }
 }
