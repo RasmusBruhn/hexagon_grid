@@ -130,7 +130,7 @@ impl<M: map::Map> State<M> {
         let render_state = RenderState::new(&window).await?;
 
         // Initialize the camera
-        let camera = Camera::new(60.0, &Transform2D::scale(&Point::new(0.5, 0.5)), &size);
+        let camera = Camera::new(60.0, &Transform2D::scale(&Point::new(0.1, 0.1)), &size);
 
         // Initialize the gpu map
         let gpu_map = GPUMap::new(2.0, &camera.get_transform(), &color_map, &map, wgpu::include_wgsl!("shader.wgsl"), &render_state);
@@ -260,7 +260,7 @@ impl<M: map::Map> State<M> {
     /// input: The input to handle
     /// 
     /// control_flow: The location to set the control flow
-    fn handle_keyboard_input(&mut self, input: &KeyboardInput, control_flow: &mut ControlFlow) {
+    fn handle_keyboard_input(&mut self, input: &KeyboardInput, _control_flow: &mut ControlFlow) {
         // Get whether it is pressed
         let pressed = if let ElementState::Pressed = input.state {
             true

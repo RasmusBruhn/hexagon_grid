@@ -164,18 +164,12 @@ impl GPUMap {
     /// 
     /// See RenderError for a description of the errors
     pub fn draw(&self, view: &wgpu::TextureView, render_state: &RenderState) -> Result<(), RenderError> {
-        // Setup the load ops
-        let load_op_clear = wgpu::LoadOp::Clear(wgpu::Color {
-            r: 1.0,
-            g: 1.0,
-            b: 1.0,
-            a: 1.0,
-        }); // TODO: Remove
-        let load_op_load = wgpu::LoadOp::Load;
+        // Figure out which chunks to render
+        let visible_buffers = self.view.visible_buffers();
 
         // Do the rendering
-        self.draw_single(DrawMode::Fill, load_op_clear, &view, render_state);
-        self.draw_single(DrawMode::Outline, load_op_load, &view, render_state);
+        self.draw_single(DrawMode::Fill, &visible_buffers, &view, render_state);
+        self.draw_single(DrawMode::Outline, &visible_buffers, &view, render_state);
 
         Ok(())
     }
@@ -189,7 +183,7 @@ impl GPUMap {
     /// load_op: The load operation for either resetting or added to existing drawings
     /// 
     /// render_state: The render state to use for rendering
-    fn draw_single(&self, mode: DrawMode, load_op: wgpu::LoadOp<wgpu::Color>, view: &wgpu::TextureView, render_state: &RenderState) {
+    fn draw_single(&self, mode: DrawMode, visible_buffers: &VisibleIndices, view: &wgpu::TextureView, render_state: &RenderState) {
         // Create the encoder
         let mut encoder = render_state.get_device().create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Command Encoder"),
@@ -208,7 +202,7 @@ impl GPUMap {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: load_op,
+                        load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     }
                 })],
@@ -225,7 +219,7 @@ impl GPUMap {
             let vertex_count = self.hex_buffers.set(mode, &mut render_pass);
 
             // Draw everything
-            self.data_buffers.draw(self.view.transform.get_center(), vertex_count, &mut render_pass, render_state);
+            self.data_buffers.draw(self.view.transform.get_center(), visible_buffers, vertex_count, &mut render_pass, render_state);
         }
 
         // Submit
@@ -316,16 +310,7 @@ impl GPUMapView {
     /// 
     /// index_size: The old index size
     fn loaded_chunks(&self, index_center: &Index, index_size: &Index) -> LoadedIndices {
-        let chunk  = (-self.index_size.get_y()..(self.index_size.get_y() + 1))
-            .map(|index_y| {
-                ((-(self.index_size.get_x() + index_y) / 2)..((self.index_size.get_x() - index_y) / 2 + 1))
-                    .map(|index_x| {
-                        Index::new(index_x + self.index_center.get_x(), index_y + self.index_center.get_y())
-                    })
-                    .collect::<Vec<Index>>()
-                    .into_iter()
-            })
-            .flatten()
+        let chunk  = Self::get_loaded_chunks(self.index_center, self.index_size)
             .map(|index| {
                 if let Some(id) = Self::index_to_id(index_center, index_size, &index, DataType::Chunk) {
                     ReloadType::Reuse(id)
@@ -336,15 +321,7 @@ impl GPUMapView {
             .collect();
 
         // Get the edges to load
-        let edge_0 = (-self.index_size.get_y()..self.index_size.get_y())
-            .map(|index_y| {
-                ((-(self.index_size.get_x() + index_y) / 2)..((self.index_size.get_x() + 1 - index_y) / 2))
-                    .map(|index_x| {
-                        Index::new(index_x + self.index_center.get_x(), index_y + self.index_center.get_y())
-                    })
-                    .collect::<Vec<Index>>().into_iter()
-            })
-            .flatten()
+        let edge_0 = Self::get_loaded_edges_0(self.index_center, self.index_size)
             .map(|index| {
                 if let Some(id) = Self::index_to_id(index_center, index_size, &index, DataType::EdgeRight) {
                     ReloadType::Reuse(id)
@@ -353,15 +330,7 @@ impl GPUMapView {
                 }
             })
             .collect();
-        let edge_1 = (-self.index_size.get_y()..self.index_size.get_y())
-            .map(|index_y| {
-                ((-(self.index_size.get_x() - 1 + index_y) / 2)..((self.index_size.get_x() - index_y) / 2 + 1))
-                    .map(|index_x| {
-                        Index::new(index_x + self.index_center.get_x(), index_y + self.index_center.get_y())
-                    })
-                    .collect::<Vec<Index>>().into_iter()
-            })
-            .flatten()
+        let edge_1 = Self::get_loaded_edges_1(self.index_center, self.index_size)
             .map(|index| {
                 if let Some(id) = Self::index_to_id(index_center, index_size, &index, DataType::EdgeLeft) {
                     ReloadType::Reuse(id)
@@ -370,15 +339,7 @@ impl GPUMapView {
                 }
             })
             .collect();
-        let edge_2 = (-self.index_size.get_y()..(self.index_size.get_y() + 1))
-            .map(|index_y| {
-                ((-(self.index_size.get_x() - 1 + index_y) / 2)..((self.index_size.get_x() + 1 - index_y) / 2 + 1))
-                    .map(|index_x| {
-                        Index::new(index_x + self.index_center.get_x(), index_y + self.index_center.get_y())
-                    })
-                    .collect::<Vec<Index>>().into_iter()
-            })
-            .flatten()
+        let edge_2 = Self::get_loaded_edges_2(self.index_center, self.index_size)
             .map(|index| {
                 if let Some(id) = Self::index_to_id(index_center, index_size, &index, DataType::EdgeVertical) {
                     ReloadType::Reuse(id)
@@ -389,15 +350,7 @@ impl GPUMapView {
             .collect();
 
         // Get the vertices to load
-        let vertex_0 = (-self.index_size.get_y()..(self.index_size.get_y() + 1))
-            .map(|index_y| {
-                ((-(self.index_size.get_x() - 1 + index_y) / 2)..((self.index_size.get_x() + 1 - index_y) / 2 + 1))
-                    .map(|index_x| {
-                        Index::new(index_x + self.index_center.get_x(), index_y + self.index_center.get_y())
-                    })
-                    .collect::<Vec<Index>>().into_iter()
-            })
-            .flatten()
+        let vertex_0 = Self::get_loaded_vertices_0(self.index_center, self.index_size)
             .map(|index| {
                 if let Some(id) = Self::index_to_id(index_center, index_size, &index, DataType::VertexTop) {
                     ReloadType::Reuse(id)
@@ -406,15 +359,7 @@ impl GPUMapView {
                 }
             })
             .collect();
-        let vertex_1 = (-self.index_size.get_y()..(self.index_size.get_y() + 1))
-            .map(|index_y| {
-                ((-(self.index_size.get_x() - 1 + index_y) / 2)..((self.index_size.get_x() + 1 - index_y) / 2 + 1))
-                    .map(|index_x| {
-                        Index::new(index_x + self.index_center.get_x(), index_y + self.index_center.get_y())
-                    })
-                    .collect::<Vec<Index>>().into_iter()
-            })
-            .flatten()
+        let vertex_1 = Self::get_loaded_vertices_1(self.index_center, self.index_size)
             .map(|index| {
                 if let Some(id) = Self::index_to_id(index_center, index_size, &index, DataType::VertexBottom) {
                     ReloadType::Reuse(id)
@@ -432,6 +377,311 @@ impl GPUMapView {
         }
     }
     
+    /// Retrieves all the indexes of the buffers to render
+    fn visible_buffers(&self) -> VisibleIndices {
+        // Get the current view
+        let view = Self::transform_to_view(&self.transform);
+
+        // Get the buffers to load
+        let chunk = Self::get_visible_chunks(self.size, view)
+            .map(|index| {
+                Self::index_to_id(&self.index_center, &self.index_size, &index, DataType::Chunk).expect(&format!("Chunk index ({:?}) was not loaded", index))
+            })
+            .collect();
+
+        let edge_0 = Self::get_visible_edges_0(self.size, view)
+        .map(|index| {
+            Self::index_to_id(&self.index_center, &self.index_size, &index, DataType::EdgeRight).expect(&format!("EdgeRight index ({:?}) was not loaded", index))
+        })
+        .collect();
+        let edge_1 = Self::get_visible_edges_1(self.size, view)
+        .map(|index| {
+            Self::index_to_id(&self.index_center, &self.index_size, &index, DataType::EdgeLeft).expect(&format!("EdgeLeft index ({:?}) was not loaded", index))
+        })
+        .collect();
+        let edge_2 = Self::get_visible_edges_2(self.size, view)
+        .map(|index| {
+            Self::index_to_id(&self.index_center, &self.index_size, &index, DataType::EdgeVertical).expect(&format!("EdgeVertical index ({:?}) was not loaded", index))
+        })
+        .collect();
+        let edges = [
+            edge_0,
+            edge_1,
+            edge_2,
+        ];
+
+        let vertex_0 = Self::get_visible_vertices_0(self.size, view)
+        .map(|index| {
+            Self::index_to_id(&self.index_center, &self.index_size, &index, DataType::VertexTop).expect(&format!("VertexTop index ({:?}) was not loaded", index))
+        })
+        .collect();
+        let vertex_1 = Self::get_visible_vertices_1(self.size, view)
+        .map(|index| {
+            Self::index_to_id(&self.index_center, &self.index_size, &index, DataType::VertexBottom).expect(&format!("VertexBottom index ({:?}) was not loaded", index))
+        })
+        .collect();
+        let vertices = [
+            vertex_0,
+            vertex_1,
+        ];
+
+        VisibleIndices {
+            chunk,
+            edges,
+            vertices,
+        }
+    }
+
+    /// Creates an iterator over all chunks visible given the view
+    /// 
+    /// # Parameters
+    /// 
+    /// size: The size of a chunk in terms of tiles
+    /// 
+    /// view: The view of the visible area
+    fn get_visible_chunks(size: usize, view: View) -> impl Iterator<Item = Index> {
+        let offset = Point::new(
+            0.5 * SQRT_3 * (size as f64 + 1.0 / 3.0),
+            0.5 * (size + 1) as f64,
+        );
+        Self::get_visible_buffer_type(size, view, offset, offset)
+    }
+
+    /// Creates an iterator over all right edges visible given the view
+    /// 
+    /// # Parameters
+    /// 
+    /// size: The size of a chunk in terms of tiles
+    /// 
+    /// view: The view of the visible area
+    fn get_visible_edges_0(size: usize, view: View) -> impl Iterator<Item = Index> {
+        let offset_negative = Point::new(
+            0.5 * SQRT_3 * (size as f64 + 1.0 / 3.0),
+            0.5 * size as f64,
+        );
+        let offset_positive = Point::new(
+            SQRT_3 * (size as f64 + 1.0 / 6.0),
+            2.0 * size as f64,
+        );
+        Self::get_visible_buffer_type(size, view, offset_negative, offset_positive)
+    }
+
+    /// Creates an iterator over all left edges visible given the view
+    /// 
+    /// # Parameters
+    /// 
+    /// size: The size of a chunk in terms of tiles
+    /// 
+    /// view: The view of the visible area
+    fn get_visible_edges_1(size: usize, view: View) -> impl Iterator<Item = Index> {
+        let offset_negative = Point::new(
+            SQRT_3 * (size as f64 + 1.0 / 6.0),
+            0.5 * size as f64,
+        );
+        let offset_positive = Point::new(
+            0.5 * SQRT_3 * (size as f64 + 1.0 / 3.0),
+            2.0 * size as f64,
+        );
+        Self::get_visible_buffer_type(size, view, offset_negative, offset_positive)
+    }
+
+    /// Creates an iterator over all vertical edges visible given the view
+    /// 
+    /// # Parameters
+    /// 
+    /// size: The size of a chunk in terms of tiles
+    /// 
+    /// view: The view of the visible area
+    fn get_visible_edges_2(size: usize, view: View) -> impl Iterator<Item = Index> {
+        let offset_negative = Point::new(
+            1.5 * SQRT_3 * (size as f64) - SQRT_3 / 3.0,
+            1.0 * size as f64 + 0.5,
+        );
+        let offset_positive = Point::new(
+            0.5 * SQRT_3 * size as f64 - SQRT_3 / 3.0,
+            1.0 * size as f64 + 0.5,
+        );
+        Self::get_visible_buffer_type(size, view, offset_negative, offset_positive)
+    }
+
+    /// Creates an iterator over all top vertices visible given the view
+    /// 
+    /// # Parameters
+    /// 
+    /// size: The size of a chunk in terms of tiles
+    /// 
+    /// view: The view of the visible area
+    fn get_visible_vertices_0(size: usize, view: View) -> impl Iterator<Item = Index> {
+        let offset_negative = Point::new(
+            1.5 * SQRT_3 * (size as f64) - SQRT_3 / 3.0,
+            size as f64 - 0.5,
+        );
+        let offset_positive = Point::new(
+            0.5 * SQRT_3 * size as f64 - SQRT_3 / 3.0,
+            2.0 * size as f64 - 0.5,
+        );
+        Self::get_visible_buffer_type(size, view, offset_negative, offset_positive)
+    }
+
+    /// Creates an iterator over all bottom vertices visible given the view
+    /// 
+    /// # Parameters
+    /// 
+    /// size: The size of a chunk in terms of tiles
+    /// 
+    /// view: The view of the visible area
+    fn get_visible_vertices_1(size: usize, view: View) -> impl Iterator<Item = Index> {
+        let offset_negative = Point::new(
+            1.5 * SQRT_3 * (size as f64) - SQRT_3 / 3.0,
+            2.0 * size as f64 - 0.5,
+        );
+        let offset_positive = Point::new(
+            0.5 * SQRT_3 * size as f64 - SQRT_3 / 3.0,
+            size as f64 - 0.5,
+        );
+        Self::get_visible_buffer_type(size, view, offset_negative, offset_positive)
+    }
+
+    /// Creates an iterator over all buffers of a single type visible given the view
+    /// 
+    /// # Parameters
+    /// 
+    /// size: The size of a chunk in terms of tiles
+    /// 
+    /// view: The view of the visible area
+    /// 
+    /// offset_negative: The distance in the negative direction before index -1 is in view
+    /// 
+    /// offset_positive: The distance in the positive direction before index 1 is in view
+    fn get_visible_buffer_type(size: usize, view: View, offset_negative: Point, offset_positive: Point) -> impl Iterator<Item = Index> {
+        let x_min = view.get_center().get_x() - 0.5 * view.get_size().get_w();
+        let x_max = view.get_center().get_x() + 0.5 * view.get_size().get_w();
+        let y_min = view.get_center().get_y() - 0.5 * view.get_size().get_h();
+        let y_max = view.get_center().get_y() + 0.5 * view.get_size().get_h();
+        let x_size = SQRT_3 * size as f64;
+        let y_size = 1.5 * size as f64;
+        let y_index_min = ((y_min + offset_negative.get_y()) / y_size).floor() as i64;
+        let y_index_max = ((y_max - offset_positive.get_y()) / y_size).ceil() as i64;
+        (y_index_min..y_index_max + 1)
+            .map(move |y| {
+                let x_index_min = ((x_min + offset_negative.get_x() - 0.5 * (y as f64) * x_size) / x_size).floor() as i64;
+                let x_index_max = ((x_max - offset_positive.get_x() - 0.5 * (y as f64) * x_size) / x_size).ceil() as i64;
+                (x_index_min..x_index_max + 1)
+                    .map(move |x| {
+                        Index::new(x, y)
+                    })
+            })
+            .flatten()
+    }
+
+    /// Creates an iterator over all indices for the given chunks
+    /// 
+    /// # Parameters
+    /// 
+    /// index_center: The center index of the chunks to get
+    /// 
+    /// index_size: The size of the chunk area to get
+    fn get_loaded_chunks(index_center: Index, index_size: Index) -> impl Iterator<Item = Index> {
+        (-index_size.get_y()..(index_size.get_y() + 1))
+            .map(move |index_y| {
+                ((-(index_size.get_x() + index_y) / 2)..((index_size.get_x() - index_y) / 2 + 1))
+                    .map(move |index_x| {
+                        Index::new(index_x + index_center.get_x(), index_y + index_center.get_y())
+                    })
+            })
+            .flatten()
+    }
+
+    /// Creates an iterator over all indices for the given edges
+    /// 
+    /// # Parameters
+    /// 
+    /// index_center: The center index of the edges to get
+    /// 
+    /// index_size: The size of the edge area to get
+    fn get_loaded_edges_0(index_center: Index, index_size: Index) -> impl Iterator<Item = Index> {
+        (-index_size.get_y()..index_size.get_y())
+            .map(move |index_y| {
+                ((-(index_size.get_x() + index_y) / 2)..((index_size.get_x() + 1 - index_y) / 2))
+                    .map(move |index_x| {
+                        Index::new(index_x + index_center.get_x(), index_y + index_center.get_y())
+                    })
+            })
+            .flatten()
+    }
+
+    /// Creates an iterator over all indices for the given edges
+    /// 
+    /// # Parameters
+    /// 
+    /// index_center: The center index of the edges to get
+    /// 
+    /// index_size: The size of the edge area to get
+    fn get_loaded_edges_1(index_center: Index, index_size: Index) -> impl Iterator<Item = Index> {
+        (-index_size.get_y()..index_size.get_y())
+            .map(move |index_y| {
+                ((-(index_size.get_x() - 1 + index_y) / 2)..((index_size.get_x() - index_y) / 2 + 1))
+                    .map(move |index_x| {
+                        Index::new(index_x + index_center.get_x(), index_y + index_center.get_y())
+                    })
+            })
+            .flatten()
+    }
+
+    /// Creates an iterator over all indices for the given edges
+    /// 
+    /// # Parameters
+    /// 
+    /// index_center: The center index of the edges to get
+    /// 
+    /// index_size: The size of the edge area to get
+    fn get_loaded_edges_2(index_center: Index, index_size: Index) -> impl Iterator<Item = Index> {
+        (-index_size.get_y()..(index_size.get_y() + 1))
+            .map(move |index_y| {
+                ((-(index_size.get_x() - 1 + index_y) / 2)..((index_size.get_x() + 1 - index_y) / 2 + 1))
+                    .map(move |index_x| {
+                        Index::new(index_x + index_center.get_x(), index_y + index_center.get_y())
+                    })
+            })
+            .flatten()
+    }
+
+    /// Creates an iterator over all indices for the given vertices
+    /// 
+    /// # Parameters
+    /// 
+    /// index_center: The center index of the vertices to get
+    /// 
+    /// index_size: The size of the vertex area to get
+    fn get_loaded_vertices_0(index_center: Index, index_size: Index) -> impl Iterator<Item = Index> {
+        (-index_size.get_y()..(index_size.get_y() + 1))
+            .map(move |index_y| {
+                ((-(index_size.get_x() - 1 + index_y) / 2)..((index_size.get_x() + 1 - index_y) / 2 + 1))
+                    .map(move |index_x| {
+                        Index::new(index_x + index_center.get_x(), index_y + index_center.get_y())
+                    })
+            })
+            .flatten()
+    }
+
+    /// Creates an iterator over all indices for the given vertices
+    /// 
+    /// # Parameters
+    /// 
+    /// index_center: The center index of the vertices to get
+    /// 
+    /// index_size: The size of the vertex area to get
+    fn get_loaded_vertices_1(index_center: Index, index_size: Index) -> impl Iterator<Item = Index> {
+        (-index_size.get_y()..(index_size.get_y() + 1))
+            .map(move |index_y| {
+                ((-(index_size.get_x() - 1 + index_y) / 2)..((index_size.get_x() + 1 - index_y) / 2 + 1))
+                    .map(move |index_x| {
+                        Index::new(index_x + index_center.get_x(), index_y + index_center.get_y())
+                    })
+            })
+            .flatten()
+    }
+
     /// Calculates the id in the buffer vector given the index of the buffer, None if it is not loaded
     /// 
     /// # Parameters
@@ -826,18 +1076,18 @@ impl GPUMapDataBuffers {
     /// render_pass: The render pass to draw to
     /// 
     /// render_state: The render state to use for rendering
-    fn draw<'a>(&'a self, origin: &Point, vertex_count: u32, render_pass: &mut wgpu::RenderPass<'a>, render_state: &RenderState) {
+    fn draw<'a>(&'a self, origin: &Point, visible_buffers: &VisibleIndices, vertex_count: u32, render_pass: &mut wgpu::RenderPass<'a>, render_state: &RenderState) {
         // Draw the chunks
-        self.chunk.draw(origin, vertex_count, render_pass, render_state);
+        self.chunk.draw(origin, &visible_buffers.chunk, vertex_count, render_pass, render_state);
 
         // Draw the edges
-        self.edges.iter().for_each(|edge| {
-            edge.draw(origin, vertex_count, render_pass, render_state);
+        self.edges.iter().zip(visible_buffers.edges.iter()).for_each(|(edge, visible_buffers)| {
+            edge.draw(origin, &visible_buffers, vertex_count, render_pass, render_state);
         });
 
         // Draw the vertices
-        self.vertices.iter().for_each(|vertex| {
-            vertex.draw(origin, vertex_count, render_pass, render_state);
+        self.vertices.iter().zip(visible_buffers.vertices.iter()).for_each(|(vertex, visible_buffers)| {
+            vertex.draw(origin, &visible_buffers, vertex_count, render_pass, render_state);
         });
     }
 }
@@ -868,19 +1118,19 @@ impl GPUMapDataBufferList {
     /// render_pass: The render pass to draw to
     /// 
     /// render_state: The render state to use for rendering
-    fn draw<'a>(&'a self, origin: &Point, vertex_count: u32, render_pass: &mut wgpu::RenderPass<'a>, render_state: &RenderState) {
+    fn draw<'a>(&'a self, origin: &Point, visible_buffers: &[usize], vertex_count: u32, render_pass: &mut wgpu::RenderPass<'a>, render_state: &RenderState) {
         // Set the locations
         render_pass.set_vertex_buffer(1, self.locations.slice(..));
 
-        // Render the buffers            
-        for buffer in &self.buffers { 
-            if let Some(buffer) = buffer {
+        // Render the buffers     
+        for index in visible_buffers {
+            if let Some(buffer) = self.buffers.get(*index).expect(&format!("The index ({:?}) should be within the vector of buffers", index)) {
                 // Set the specific data
                 buffer.set(origin, render_pass, render_state);
                 
                 // Draw the hexagons
                 render_pass.draw_indexed(0..vertex_count, 0, 0..buffer.size as u32);            
-            }               
+            }
         }
     }
 }
@@ -1067,9 +1317,6 @@ impl GPUMapUniforms {
     /// 
     /// render_state: The render state to use for rendering
     fn write_transform(&self, transform: &Transform2D, render_state: &RenderState) {
-        // TODO: Remove this after testing
-        let transform = Transform2D::scale(&Point::new(0.05, 0.05)) * transform;
-
         render_state.get_queue().write_buffer(&self.center_transform, 0, bytemuck::cast_slice(&transform.get_data_center_transform()));
     }
 
@@ -1343,7 +1590,7 @@ impl Vertex {
     /// # Parameters
     /// 
     /// points: The points to convert
-    fn from_points(points: &[Point]) -> Vec<Self> {
+    fn _from_points(points: &[Point]) -> Vec<Self> {
         points.iter().map(|point| Self { position: [point.get_x() as f32, point.get_y() as f32] }).collect()
     }
 
@@ -1488,6 +1735,17 @@ struct LoadedIndices {
     edges: [Vec<ReloadType>; 3],
     /// The vertex buffers
     vertices: [Vec<ReloadType>; 2],
+}
+
+/// Contains all the id's of the buffers to render
+#[derive(Clone, Debug)]
+struct VisibleIndices {
+    /// The chunk buffers
+    chunk: Vec<usize>,
+    /// The edge buffers
+    edges: [Vec<usize>; 3],
+    /// The vertex buffers
+    vertices: [Vec<usize>; 2],
 }
 
 /// Used to describe errors when rendering
