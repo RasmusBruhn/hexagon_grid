@@ -4,7 +4,7 @@ use std::env;
 const N: usize = 10;
 const COLOR_START: hex::color::Color = hex::color::Color::new_rgb(0.0, 0.0, 1.0);
 const COLOR_END: hex::color::Color = hex::color::Color::new_rgb(0.0, 0.0, 0.0);
-const FRAMERATE: f64 = 60.0;
+const FRAMERATE: f64 = 20.0;
 
 fn main() {
     env::set_var("RUST_BACKTRACE", "1");
